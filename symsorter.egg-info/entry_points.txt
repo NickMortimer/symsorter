@@ -1,0 +1,4 @@
+[console_scripts]
+symsorter = symsorter.cli:main
+symsorter-encode = symsorter.cli:encode_command
+symsorter-gui = symsorter.gui:main
