@@ -2,7 +2,6 @@ import typer
 from pathlib import Path
 import numpy as np
 import torch
-import clip
 from PIL import Image
 from tqdm import tqdm
 from doit.doit_cmd import DoitMain
@@ -13,6 +12,13 @@ from .config import cfg
 from doit.tools import check_timestamp_unchanged
 from transformers import Dinov2Model, AutoImageProcessor
 import timm
+
+# Try to import CLIP and set availability flag
+try:
+    import clip
+    CLIP_AVAILABLE = True
+except ImportError:
+    CLIP_AVAILABLE = False
 
 app = typer.Typer()
 
@@ -275,9 +281,6 @@ def task_cluster_images():
 
 
     input_dir = cfg.get_url('encode_input_dir')
-    output_dir = cfg.get_url('encode_output_dir')
-    recursive = cfg.get('encode_recursive')
-    pattern = cfg.get('encode_pattern')
     # get all jpgs in subfolders
     files = list(input_dir.rglob(f'**/*.npz')) 
     for file in files:
@@ -458,7 +461,6 @@ def task_cluster_images():
 def doit_encode(
     ctx: typer.Context,
     input_dir: Path = typer.Argument(..., help="Directory containing image folders to process"),
-    output_dir: Path = typer.Argument(..., help="Directory to save .npz embedding files"),
     recursive: bool = typer.Option(False, help="Process subdirectories recursively"),
     pattern: str = typer.Option("*.jpg", help="Image pattern to match"),
     doit_db: str = typer.Option(".doit-db", help="Path to doit database file"),
@@ -482,7 +484,6 @@ def doit_encode(
     
     # Run doit with custom database location
     cfg.set('encode_input_dir', str(input_dir))
-    cfg.set('encode_output_dir', str(output_dir))
     cfg.set('encode_recursive', recursive)
     cfg.set('encode_pattern', pattern)
     cfg.set('encode_batch_size', batch_size)

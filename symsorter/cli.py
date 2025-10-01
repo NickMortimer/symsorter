@@ -4,7 +4,6 @@ Command-line interface for SymSorter
 import typer
 from pathlib import Path
 import sys
-from .clip_encode import app as encode_app, encode_images_in_folder
 
 app = typer.Typer(
     name="symsorter",
@@ -12,8 +11,12 @@ app = typer.Typer(
     no_args_is_help=True
 )
 
-# Add encoding commands as subcommand
-app.add_typer(encode_app, name="encode", help="CLIP encoding commands")
+# Import the encode and inspect commands directly from clip_encode
+from .clip_encode import doit_encode as encode, inspect
+
+# Register the commands with the main app
+app.command(name="encode")(encode)
+app.command(name="inspect")(inspect)
 
 @app.command()
 def gui(
@@ -68,7 +71,7 @@ def similarity(
     from .clip_encode import load_existing_embeddings, load_clip_model, CLIP_AVAILABLE
     
     if not CLIP_AVAILABLE:
-        typer.echo("❌ CLIP not installed. Install with: pip install git+https://github.com/openai/CLIP.git", err=True)
+        typer.echo("❌ CLIP not installed. Install with: pip install openai-clip", err=True)
         raise typer.Exit(1)
     
     try:
