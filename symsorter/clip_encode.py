@@ -91,7 +91,15 @@ def task_encode_folders():
         device = "cuda" if torch.cuda.is_available() else "cpu"
         model_type = cfg.get('encode_model_type', 'clip')  # 'clip', 'dinov3', or 'dinov3_timm'
         
+        # Print device information
+        print(f"🚀 Using device: {device.upper()}")
+        if device == "cuda":
+            print(f"   GPU: {torch.cuda.get_device_name()}")
+        else:
+            print("   Note: CUDA not available, using CPU (encoding will be slower)")
+        
         # Load appropriate model
+        print(f"📦 Loading {model_type} model...")
         if model_type == 'clip':
             model, preprocess_fn = clip.load("ViT-B/32", device=device)
         elif model_type == 'dinov3':
@@ -101,6 +109,7 @@ def task_encode_folders():
         else:
             raise ValueError(f"Unknown model type: {model_type}")
         
+        print(f"✅ Model loaded successfully on {device}")
         dependencies.sort()
 
         def load_and_crop(image):

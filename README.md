@@ -245,14 +245,14 @@ export SYMSORTER_CACHE_DIR=/path/to/cache
 
 ```bash
 # Encode with specific model and settings
-symsorter-encode images/ \
+symsorter encode images/ \
   --model dinov3 \
   --batch-size 32 \
   --device cuda \
   --output marine_survey.npz
 
 # Launch GUI with specific settings
-symsorter-gui \
+symsorter gui \
   --embeddings marine_survey.npz \
   --classes marine_classes.yaml
 ```
