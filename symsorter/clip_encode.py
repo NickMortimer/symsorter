@@ -89,15 +89,7 @@ def task_encode_folders():
 
     def encode_folder_action(dependencies, targets):
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        model_type = cfg.get('encode_model_type', 'clip')  # 'clip', 'dinov3', or 'dinov3_timm'
-        
-        # Print device information
-        print(f"🚀 Using device: {device.upper()}")
-        if device == "cuda":
-            print(f"   GPU: {torch.cuda.get_device_name()}")
-        else:
-            print("   Note: CUDA not available, using CPU (encoding will be slower)")
-        
+      
         # Load appropriate model
         print(f"📦 Loading {model_type} model...")
         if model_type == 'clip':
@@ -481,7 +473,13 @@ def doit_encode(
     """
     input_dir = Path(input_dir)
     doit_db = input_dir / doit_db 
-    
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    # Print device information
+    print(f"🚀 Using device: {device.upper()}")
+    if device == "cuda":
+        print(f"   GPU: {torch.cuda.get_device_name()}")
+    else:
+        print("   Note: CUDA not available, using CPU (encoding will be slower)")
     # Validate model type
     valid_models = ['clip', 'dinov3', 'dinov3_timm']
     if model_type not in valid_models:
