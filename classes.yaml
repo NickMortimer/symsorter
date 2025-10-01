@@ -1,0 +1,19 @@
+classes:
+  - name: turtle
+    keystroke: "5"
+    description: "Sea turtle images"
+  - name: waves
+    keystroke: "2"
+    description: "Wave and water surface images"
+  - name: beach
+    keystroke: "1"
+    description: "Beach and shoreline images"
+  - name: benthic
+    keystroke: "3"
+    description: "Seafloor and benthic habitat images"
+  - name: ocean
+    keystroke: "4"
+    description: "Open ocean images"
+  - name: boat
+    keystroke: "6"
+    description: "Boat and ship images"

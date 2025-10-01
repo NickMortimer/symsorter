@@ -2,33 +2,30 @@ import typer
 from pathlib import Path
 import numpy as np
 import torch
-try:
-    import clip
-    CLIP_AVAILABLE = True
-except ImportError:
-    print("CLIP not installed. Install with: pip install git+https://github.com/openai/CLIP.git")
-    CLIP_AVAILABLE = False
+import clip
 from PIL import Image
 from tqdm import tqdm
+from doit.doit_cmd import DoitMain
+from doit.cmd_base import ModuleTaskLoader
+from doit.tools import run_once
+import pandas as pd
+from .config import cfg
+from doit.tools import check_timestamp_unchanged
+from transformers import Dinov2Model, AutoImageProcessor
+import timm
 
 app = typer.Typer()
 
+DOIT_CONFIG = {'check_file_uptodate': 'timestamp'}
+
 def load_clip_model(device='cuda'):
     """Load CLIP model and preprocessing function."""
-    if not CLIP_AVAILABLE:
-        raise ImportError("CLIP not installed. Install with: pip install git+https://github.com/openai/CLIP.git")
-    
-    if device == 'cuda' and not torch.cuda.is_available():
-        device = 'cpu'
-        print("CUDA not available, using CPU")
-    
     model, preprocess = clip.load("ViT-B/32", device=device)
     return model, preprocess
 
 def load_existing_embeddings(npz_path):
     """Helper function to load existing embeddings from npz file"""
     existing_embeddings = {}
-    npz_path = Path(npz_path)
     if npz_path.exists():
         try:
             data = np.load(npz_path, allow_pickle=True)
@@ -39,62 +36,69 @@ def load_existing_embeddings(npz_path):
             print(f"Error loading existing embeddings: {e}")
     return existing_embeddings
 
-def encode_images_in_folder(
-    folder_path: Path,
-    output_path: Path = None,
-    crop_size: int = 0,
-    batch_size: int = 32,
-    device: str = "auto"
-):
-    """
-    Encode all images in a folder using CLIP embeddings.
-    
-    Args:
-        folder_path: Path to folder containing images
-        output_path: Path for output NPZ file (defaults to folder_name_clip.npz)
-        crop_size: Size to crop images to (0 = no crop)
-        batch_size: Batch size for processing
-        device: Device to use ('cuda', 'cpu', or 'auto')
-    """
-    if not CLIP_AVAILABLE:
-        raise ImportError("CLIP not installed. Install with: pip install git+https://github.com/openai/CLIP.git")
-    
-    folder_path = Path(folder_path)
-    if not folder_path.exists():
-        raise FileNotFoundError(f"Folder not found: {folder_path}")
-    
-    # Set up output path
-    if output_path is None:
-        output_path = folder_path.parent / f"{folder_path.name}_clip.npz"
-    else:
-        output_path = Path(output_path)
-    
-    # Set device
-    if device == "auto":
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-    
-    # Load CLIP model
-    print(f"Loading CLIP model on {device}...")
-    model, preprocess = load_clip_model(device)
-    
-    # Find all image files
-    image_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif'}
-    image_files = []
-    for ext in image_extensions:
-        image_files.extend(folder_path.glob(f"*{ext}"))
-        image_files.extend(folder_path.glob(f"*{ext.upper()}"))
-    
-    image_files.sort()
-    print(f"Found {len(image_files)} images in {folder_path}")
-    
-    if not image_files:
-        print("No images found!")
+def save_folder_embeddings(npz_path, embeddings_dict):
+    """Helper function to save embeddings dictionary to npz file"""
+    if not embeddings_dict:
+        print(f"No embeddings to save for {npz_path}")
         return
     
-    def load_and_crop(image_path):
-        """Load and optionally crop image"""
-        try:
-            data = Image.open(image_path).convert("RGB")
+    filenames = list(embeddings_dict.keys())
+    embeddings = np.array(list(embeddings_dict.values()))
+    
+    npz_path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        npz_path,
+        embeddings=embeddings,
+        filenames=filenames
+    )
+    print(f"Saved {len(embeddings)} embeddings to {npz_path}")
+
+def load_dinov3_model(model_name='dinov2-base', device='cuda'):
+    """Load DINOv3 model and preprocessing function."""
+    # You can use 'dinov2-small', 'dinov2-base', 'dinov2-large', 'dinov2-giant'
+    processor = AutoImageProcessor.from_pretrained(f'facebook/{model_name}')
+    model = Dinov2Model.from_pretrained(f'facebook/{model_name}')
+    model = model.to(device)
+    model.eval()
+    return model, processor
+
+# Alternative: Using timm (often faster)
+def load_dinov3_timm(model_name='vit_base_patch14_dinov2.lvd142m', device='cuda'):
+    """Load DINOv3 via timm (alternative approach)."""
+    model = timm.create_model(model_name, pretrained=True, num_classes=0)  # num_classes=0 for feature extraction
+    model = model.to(device)
+    model.eval()
+    
+    # Get the default data config for preprocessing
+    data_config = timm.data.resolve_model_data_config(model)
+    transforms = timm.data.create_transform(**data_config, is_training=False)
+    
+    return model, transforms
+
+def task_encode_folders():
+    """Doit task generator for encoding image folders."""
+    
+    def image_to_pickle_name(image_path, crop_size, model_type='clip'):
+        return image_path.parent.parent.parent / f'{image_path.parent.parent.parent.name}_{image_path.parent.name}_{model_type}_{crop_size:03d}.npz'
+
+    def encode_folder_action(dependencies, targets):
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model_type = cfg.get('encode_model_type', 'clip')  # 'clip', 'dinov3', or 'dinov3_timm'
+        
+        # Load appropriate model
+        if model_type == 'clip':
+            model, preprocess_fn = clip.load("ViT-B/32", device=device)
+        elif model_type == 'dinov3':
+            model, preprocess_fn = load_dinov3_model('dinov2-base', device)
+        elif model_type == 'dinov3_timm':
+            model, preprocess_fn = load_dinov3_timm('vit_base_patch14_dinov2.lvd142m', device)
+        else:
+            raise ValueError(f"Unknown model type: {model_type}")
+        
+        dependencies.sort()
+
+        def load_and_crop(image):
+            data = Image.open(image).convert("RGB")
             if crop_size > 0:
                 w, h = data.size
                 side = min(w, h, crop_size)
@@ -106,95 +110,392 @@ def encode_images_in_folder(
                 if side != crop_size:
                     data = data.resize((crop_size, crop_size))
             return data
-        except Exception as e:
-            print(f"Error loading {image_path}: {e}")
-            return None
-    
-    def encode_batch(image_paths):
-        """Encode a batch of images"""
-        raw_images = []
-        valid_paths = []
         
-        for path in image_paths:
-            img = load_and_crop(path)
-            if img is not None:
-                raw_images.append(img)
-                valid_paths.append(path)
-        
-        if not raw_images:
-            return np.array([]), []
-        
-        images = [preprocess(img) for img in raw_images]
-        batch = torch.stack(images).to(device)
-        
-        with torch.no_grad():
-            feats = model.encode_image(batch)
-            feats /= feats.norm(dim=-1, keepdim=True)
-        
-        feats = feats.to(dtype=torch.float32)
-        return feats.cpu().numpy(), valid_paths
-    
-    # Process images in batches
-    all_embeddings = []
-    all_filenames = []
-    
-    def chunked(lst, size):
-        for i in range(0, len(lst), size):
-            yield lst[i:i + size]
-    
-    num_batches = (len(image_files) + batch_size - 1) // batch_size
-    for batch in tqdm(chunked(image_files, batch_size), total=num_batches, desc="Encoding batches"):
-        batch_embeddings, valid_paths = encode_batch(batch)
-        if len(batch_embeddings) > 0:
-            all_embeddings.append(batch_embeddings)
-            all_filenames.extend([p.name for p in valid_paths])
-    
-    if not all_embeddings:
-        print("No images were successfully processed!")
-        return
-    
-    # Combine all embeddings
-    embeddings_array = np.vstack(all_embeddings)
-    filenames_array = np.array(all_filenames)
-    
-    # Save to NPZ file
-    print(f"Saving {len(embeddings_array)} embeddings to {output_path}")
-    np.savez_compressed(
-        output_path,
-        embeddings=embeddings_array,
-        filenames=filenames_array
-    )
-    
-    print(f"Successfully encoded {len(embeddings_array)} images")
-    return output_path
+        def encode_batch_clip(image_paths):
+            """Encode batch using CLIP."""
+            raw_images = [load_and_crop(p) for p in image_paths]
+            images = [preprocess_fn(img) for img in raw_images]
+            batch = torch.stack(images).to(device)
 
-@app.command()
-def encode(
-    folder: Path = typer.Argument(..., help="Folder containing images to encode"),
-    output: Path = typer.Option(None, help="Output NPZ file path"),
-    crop_size: int = typer.Option(0, help="Crop size for images (0 = no crop)"),
-    batch_size: int = typer.Option(32, help="Batch size for processing"),
-    device: str = typer.Option("auto", help="Device to use (cuda/cpu/auto)")
+            with torch.no_grad():
+                feats = model.encode_image(batch)
+                feats /= feats.norm(dim=-1, keepdim=True)
+            return feats.cpu().numpy()
+
+        def encode_batch_dinov3(image_paths):
+            """Encode batch using DINOv3 (transformers)."""
+            raw_images = [load_and_crop(p) for p in image_paths]
+            inputs = preprocess_fn(images=raw_images, return_tensors="pt")
+            inputs = {k: v.to(device) for k, v in inputs.items()}
+
+            with torch.no_grad():
+                outputs = model(**inputs)
+                # Use CLS token representation
+                feats = outputs.last_hidden_state[:, 0]  # Shape: [batch_size, hidden_size]
+                feats = feats / feats.norm(dim=-1, keepdim=True)
+            return feats.cpu().numpy()
+
+        def encode_batch_dinov3_timm(image_paths):
+            """Encode batch using DINOv3 (timm)."""
+            raw_images = [load_and_crop(p) for p in image_paths]
+            images = [preprocess_fn(img) for img in raw_images]
+            batch = torch.stack(images).to(device)
+
+            with torch.no_grad():
+                feats = model(batch)  # Already returns features
+                feats = feats / feats.norm(dim=-1, keepdim=True)
+            return feats.cpu().numpy()
+
+        # Choose encoding function based on model type
+        if model_type == 'clip':
+            encode_batch = encode_batch_clip
+        elif model_type == 'dinov3':
+            encode_batch = encode_batch_dinov3
+        elif model_type == 'dinov3_timm':
+            encode_batch = encode_batch_dinov3_timm
+
+        # Prepare the batches
+        def chunked(dependencies, size):
+            for i in range(0, len(dependencies), size):
+                yield dependencies[i:i + size]
+        
+        # Process all images in large batches with progress bar
+        all_embeddings = []
+        batch_size = cfg.get('encode_batch_size')
+        num_batches = (len(dependencies) + batch_size - 1) // batch_size
+        for batch in tqdm(chunked(dependencies, batch_size), total=num_batches, desc=f"Encoding batches ({model_type})"):
+            batch_embeddings = encode_batch(batch)
+            all_embeddings.extend(batch_embeddings)
+        
+        # Now organize by folder and save to npz files
+        current_folder = None
+        current_npz_path = None
+        existing_embeddings = {}
+        folder_embeddings = []
+        folder_filenames = []
+
+        for image_path, embedding in tqdm(zip(dependencies, all_embeddings), total=len(dependencies), desc="Saving embeddings"):
+            image_path = Path(image_path)
+            npz_path = image_to_pickle_name(image_path, crop_size, model_type)
+            relative_name = image_path.relative_to(npz_path.parent)
+            # If we've moved to a new folder, save the previous one
+            if npz_path != current_npz_path:
+                if current_npz_path is not None:
+                    # Save previous folder's data
+                    save_folder_embeddings(current_npz_path, existing_embeddings)
+
+                # Load existing embeddings for new folder
+                current_npz_path = npz_path
+                existing_embeddings = load_existing_embeddings(current_npz_path)
+            
+            # Add current image's embedding if it's not already in existing
+            existing_embeddings[relative_name] = embedding
+        # Save the last folder
+        if current_npz_path is not None:
+            save_folder_embeddings(current_npz_path, existing_embeddings)
+    crop_size = cfg.get('encode_crop_size', 0)
+    model_type = cfg.get('encode_model_type', 'clip')
+    input_dir = cfg.get_url('encode_input_dir')
+    pattern = cfg.get('encode_pattern')
+    
+    # get all jpgs in subfolders
+    all_files = list(input_dir.rglob(f'**/{pattern.lower()}')) + list(input_dir.rglob(f'**/{pattern.upper()}'))
+    
+    # Group files by their npz path first
+    files_by_npz = {}
+    for file_path in all_files:
+        npz_path = image_to_pickle_name(file_path, crop_size, model_type)
+        if npz_path not in files_by_npz:
+            files_by_npz[npz_path] = []
+        files_by_npz[npz_path].append(file_path)
+    
+    # Filter to only include files that need processing
+    files_to_process = []
+    for npz_path, file_paths in files_by_npz.items():
+        # Load existing embeddings once per npz file
+        existing_filenames = set()
+        if npz_path.exists():
+            try:
+                data = np.load(npz_path, allow_pickle=True)
+                if 'embeddings' in data and 'filenames' in data:
+                    existing_filenames = set(str(f) for f in data['filenames'])
+            except Exception:
+                pass  # If we can't load, assume all files need processing
+        
+        # Check each file in this group
+        for file_path in file_paths:
+            relative_name = file_path.relative_to(npz_path.parent)
+            if str(relative_name) not in existing_filenames:
+                files_to_process.append(file_path)
+    
+    # Only create targets for folders that have files to process
+    targets = list(set([image_to_pickle_name(f, crop_size, model_type) for f in files_to_process]))
+
+    return {
+            'file_dep' : files_to_process,
+            'targets' : targets,
+            'actions':[encode_folder_action],
+            'clean':True,
+
+        
+    }
+
+def task_cluster_images():
+    def cluster_images(dependencies, targets):
+        from sklearn.cluster import KMeans
+        import pandas as pd
+        import numpy as np
+
+        if not dependencies:
+            print("No .npz files found to cluster.")
+            return
+        npz_path = Path(dependencies[0])
+        try:
+            data = np.load(npz_path, allow_pickle=True)
+            embeddings = data['embeddings']
+            filenames = data['filenames']
+            if len(embeddings) > 2:
+                num_clusters = min(5, len(embeddings) // 2)
+                kmeans = KMeans(n_clusters=num_clusters, random_state=42)
+                labels = kmeans.fit_predict(embeddings)
+
+                df = pd.DataFrame({
+                    'filename': filenames,
+                    'cluster': labels
+                })
+                output_csv = targets[0]
+
+                print(f"Clustered {len(embeddings)} embeddings into {num_clusters} clusters. Saved to {output_csv}")
+            else:
+                df = pd.DataFrame(columns=['filename', 'cluster'])                
+            df.to_csv(output_csv, index=False)                
+
+        except Exception as e:
+            print(f"Error processing {npz_path}: {e}")
+
+
+    input_dir = cfg.get_url('encode_input_dir')
+    output_dir = cfg.get_url('encode_output_dir')
+    recursive = cfg.get('encode_recursive')
+    pattern = cfg.get('encode_pattern')
+    # get all jpgs in subfolders
+    files = list(input_dir.rglob(f'**/*.npz')) 
+    for file in files:
+        targets = file.parent / f"{file.stem}_clustered.csv"
+        yield {
+                    'name' : targets,
+                    'file_dep' : [file],
+                    'targets' : [targets],
+                    'actions':[cluster_images],
+                    'clean':True,
+                    'uptodate': [True],
+
+                }
+    
+# def task_plot_dendrograms():
+#     def plot_dendrogram(dependencies, targets):
+#         import numpy as np
+#         from sklearn.metrics.pairwise import cosine_similarity
+#         from scipy.cluster.hierarchy import linkage, dendrogram, fcluster
+#         import matplotlib.pyplot as plt
+        
+#         npz_path = Path(dependencies[0])
+        
+#         try:
+#             data = np.load(npz_path, allow_pickle=True)
+#             embeddings = data['embeddings']
+#             filenames = data['filenames']
+            
+#             if len(embeddings) < 2:
+#                 print(f"Skipping {npz_path.stem}: too few samples ({len(embeddings)})")
+#                 # Create empty marker file
+#                 with open(targets[0], 'w') as f:
+#                     f.write(f"Skipped {npz_path.stem}: too few samples")
+#                 return
+            
+#             # Step 1: Compute cosine distance (1 - similarity)
+#             cos_sim = cosine_similarity(embeddings)
+#             cos_dist = 1 - cos_sim
+            
+#             # Step 2: Hierarchical clustering
+#             Z = linkage(cos_dist, method="average")  # "average" works well for cosine
+            
+#             # Step 3: Plot dendrogram
+#             plt.figure(figsize=(12, 6))
+#             dendrogram(Z, labels=np.arange(len(embeddings)))
+#             plt.title(f"Hierarchical Clustering Dendrogram - {npz_path.stem}")
+#             plt.xlabel("Image index")
+#             plt.ylabel("Cosine distance")
+            
+#             # Save plot
+#             plot_path = targets[0]
+#             plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+#             plt.close()  # Close figure to free memory
+            
+#             # Step 4: Optionally cut into flat clusters and save info
+#             labels = fcluster(Z, t=1.5, criterion="distance")
+            
+#             # Save cluster info to text file
+#             info_path = Path(plot_path).with_suffix('.txt')
+#             with open(info_path, 'w') as f:
+#                 f.write(f"Hierarchical clustering results for {npz_path.stem}\n")
+#                 f.write(f"Number of images: {len(embeddings)}\n")
+#                 f.write(f"Number of clusters (distance < 0.3): {len(np.unique(labels))}\n")
+#                 f.write(f"Cluster labels: {labels.tolist()}\n")
+#                 f.write("\nFilename to cluster mapping:\n")
+#                 for filename, label in zip(filenames, labels):
+#                     f.write(f"{filename}: cluster_{label}\n")
+            
+#             print(f"Created dendrogram for {npz_path.stem}: {len(embeddings)} images, {len(np.unique(labels))} clusters")
+            
+#         except Exception as e:
+#             print(f"Error creating dendrogram for {npz_path}: {e}")
+#             # Create error marker file
+#             with open(targets[0], 'w') as f:
+#                 f.write(f"Error processing {npz_path.stem}: {e}")
+
+#     input_dir = cfg.get_url('encode_input_dir')
+#     output_dir = cfg.get_url('encode_output_dir')
+    
+#     # Find all .npz files
+#     npz_files = list(input_dir.rglob('**/*.npz'))
+    
+#     for npz_file in npz_files:
+#         # Create dendrogram task for each npz file
+#         survey_name = npz_file.stem
+#         plot_name = f"{survey_name}_dendrogram.png"
+#         plot_path = Path(output_dir) / plot_name
+#         plot_path.parent.mkdir(exist_ok=True, parents=True)
+        
+#         yield {
+#             'name': f"dendrogram_{survey_name}",
+#             'file_dep': [npz_file],
+#             'targets': [plot_path],
+#             'actions': [plot_dendrogram],
+#             'clean': True,
+#         }
+
+# def task_organize_clusters():
+#     def organize_cluster_images(dependencies, targets):
+#         import pandas as pd
+#         import shutil
+        
+#         csv_path = Path(dependencies[0])
+        
+#         try:
+#             # Load cluster CSV
+#             df = pd.read_csv(csv_path)
+            
+#             # Get the base directory (where the images are located)
+#             base_dir = csv_path.parent
+            
+#             # Get output directory from config
+#             output_dir = Path(cfg.get('encode_output_dir'))
+            
+#             # Create cluster directories for this survey/folder
+#             survey_name = csv_path.stem.replace('_clustered', '')
+#             cluster_base_dir = output_dir / f"{survey_name}_clusters"
+#             cluster_base_dir.mkdir(exist_ok=True)
+            
+#             # Group by cluster
+#             clusters = df.groupby('cluster')
+            
+#             for cluster_id, cluster_df in clusters:
+#                 # Create cluster directory
+#                 cluster_dir = cluster_base_dir / f"cluster_{cluster_id}"
+#                 cluster_dir.mkdir(exist_ok=True)
+                
+#                 # Copy images to cluster directory
+#                 copied_count = 0
+#                 for filename in cluster_df['filename']:
+#                     # Construct source path
+#                     src_path = base_dir / filename
+                    
+#                     if src_path.exists():
+#                         # Create destination path (keep original filename)
+#                         dst_path = cluster_dir / src_path.name
+                        
+#                         # Copy file if it doesn't exist or is newer
+#                         if not dst_path.exists() or src_path.stat().st_mtime > dst_path.stat().st_mtime:
+#                             shutil.copy2(src_path, dst_path)
+#                             copied_count += 1
+                
+#                 print(f"Cluster {cluster_id}: copied {copied_count} images to {cluster_dir}")
+            
+#             # Create completion marker
+#             marker_file = targets[0]
+#             with open(marker_file, 'w') as f:
+#                 f.write(f"Organized clusters for {survey_name} at {cluster_base_dir}")
+                
+#         except Exception as e:
+#             print(f"Error organizing clusters from {csv_path}: {e}")
+
+#     input_dir = cfg.get_url('encode_input_dir')
+#     output_dir = cfg.get_url('encode_output_dir')
+    
+#     # Find all cluster CSV files
+#     cluster_files = list(input_dir.rglob('**/*_clustered.csv'))
+    
+#     for csv_file in cluster_files:
+#         # Create organize task for each cluster CSV
+#         survey_name = csv_file.stem.replace('_clustered', '')
+#         marker_name = f"{survey_name}_clusters_organized.txt"
+#         marker_path = Path(output_dir) / marker_name
+#         marker_path.parent.mkdir(exist_ok=True, parents=True)
+        
+#         yield {
+#             'name': f"organize_clusters_{survey_name}",
+#             'file_dep': [csv_file],
+#             'targets': [marker_path],
+#             'actions': [organize_cluster_images],
+#             'clean': True,
+#         }
+
+
+
+
+@app.command('encode')
+def doit_encode(
+    ctx: typer.Context,
+    input_dir: Path = typer.Argument(..., help="Directory containing image folders to process"),
+    output_dir: Path = typer.Argument(..., help="Directory to save .npz embedding files"),
+    recursive: bool = typer.Option(False, help="Process subdirectories recursively"),
+    pattern: str = typer.Option("*.jpg", help="Image pattern to match"),
+    doit_db: str = typer.Option(".doit-db", help="Path to doit database file"),
+    batch_size: int = typer.Option(128, help="Batch size for processing images"),
+    crop_size: int = typer.Option(0, help="Crop size for images to encode"),
+    model_type: str = typer.Option('clip', help="Model to use: 'clip', 'dinov3', or 'dinov3_timm'")
 ):
     """
-    Encode images in a folder using CLIP embeddings.
+    Use doit to encode images in folders (for dependency tracking and incremental builds).
     """
-    try:
-        output_path = encode_images_in_folder(
-            folder_path=folder,
-            output_path=output,
-            crop_size=crop_size,
-            batch_size=batch_size,
-            device=device
-        )
-        typer.echo(f"✅ Successfully encoded images to {output_path}")
-    except Exception as e:
-        typer.echo(f"❌ Error: {e}", err=True)
+    input_dir = Path(input_dir)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(exist_ok=True, parents=True)
+    doit_db = input_dir / doit_db 
+    
+    # Validate model type
+    valid_models = ['clip', 'dinov3', 'dinov3_timm']
+    if model_type not in valid_models:
+        typer.echo(f"Error: model_type must be one of {valid_models}")
         raise typer.Exit(1)
+    
+    # Run doit with custom database location
+    cfg.set('encode_input_dir', str(input_dir))
+    cfg.set('encode_output_dir', str(output_dir))
+    cfg.set('encode_recursive', recursive)
+    cfg.set('encode_pattern', pattern)
+    cfg.set('encode_batch_size', batch_size)
+    cfg.set('encode_crop_size', crop_size)
+    cfg.set('encode_model_type', model_type)
+  
+    DoitMain(ModuleTaskLoader(globals())).run(ctx.args + ['--db-file', str(doit_db), 'encode_folders'])
+
+
 
 @app.command()
 def inspect(
-    npz_file: Path = typer.Argument(..., help="Path to .npz file to inspect")
+    npz_file: Path = typer.Option(..., help="Path to .npz file to inspect")
 ):
     """
     Inspect the contents of an embeddings .npz file.
@@ -219,19 +520,14 @@ def inspect(
             typer.echo(f"Number of files: {len(filenames)}")
             typer.echo(f"First 5 filenames: {filenames[:5]}")
         
-        if 'hidden_flags' in data:
-            hidden_flags = data['hidden_flags'].item()
-            if isinstance(hidden_flags, dict):
-                hidden_count = sum(1 for hidden in hidden_flags.values() if hidden)
-                typer.echo(f"Hidden flags: {len(hidden_flags)} total, {hidden_count} hidden")
+        if 'folder_name' in data:
+            typer.echo(f"Folder name: {data['folder_name']}")
         
-        if 'categories' in data:
-            categories = data['categories'].item()
-            if isinstance(categories, dict):
-                typer.echo(f"Categories: {len(categories)} images classified")
-        
+        if 'folder_path' in data:
+            typer.echo(f"Folder path: {data['folder_path']}")
+            
     except Exception as e:
-        typer.echo(f"Error reading file: {e}", err=True)
+        typer.echo(f"Error reading {npz_file}: {e}")
         raise typer.Exit(1)
 
 if __name__ == "__main__":

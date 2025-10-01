@@ -9,7 +9,9 @@ import sys
 import os
 import math
 import numpy as np
+import traceback
 import argparse
+import yaml
 from pathlib import Path
 from .clip_encode import load_existing_embeddings
 
@@ -192,7 +194,7 @@ class ImageBrowser(QMainWindow):
         # Smart image caching system
         self.image_cache = {}  # Cache for processed thumbnails: {(filename, icon_size, crop_size): QIcon}
         self.raw_image_cache = {}  # Cache for raw QPixmap images: {filename: QPixmap}
-        self.max_cache_size = 3000  # Maximum number of images to keep in cache
+        self.max_cache_size = 10000  # Maximum number of images to keep in cache
         self.cache_access_order = []  # Track access order for LRU eviction
         
         # Track unsaved changes
@@ -200,6 +202,8 @@ class ImageBrowser(QMainWindow):
         
         # YOLO class management
         self.classes = []  # List of class names
+        self.class_keystrokes = {}  # Dictionary mapping class index to keystroke
+        self.class_descriptions = {}  # Dictionary mapping class index to description
         self.image_categories = {}  # Store category assignments for each image
         self.class_file_path = class_file
         self.last_used_class_idx = None  # Track last used class for Enter key
@@ -217,8 +221,8 @@ class ImageBrowser(QMainWindow):
         
         # Thread pool for faster image loading
         self.thread_pool = QThreadPool()
-        # Set max threads to CPU count * 2 (good for I/O bound tasks like image loading)
-        max_threads = min(8, QThreadPool.globalInstance().maxThreadCount() * 2)
+        # Set max threads to CPU count * 3 (good for I/O bound tasks like image loading)
+        max_threads = min(16, QThreadPool.globalInstance().maxThreadCount() * 3)
         self.thread_pool.setMaxThreadCount(max_threads)
         self.active_workers = []  # Keep references to active workers
         self.background_load_timer = QTimer()  # Timer for background loading
@@ -707,13 +711,13 @@ class ImageBrowser(QMainWindow):
             self,
             "Select Class File",
             "",
-            "Text files (*.txt);;Names files (*.names);;All files (*)"
+            "YAML files (*.yaml *.yml);;Text files (*.txt);;Names files (*.names);;All files (*)"
         )
         if class_file:
             self.load_class_file(class_file)
     
     def load_class_file(self, class_file_path):
-        """Load YOLO class names from file"""
+        """Load class names, keystrokes, and descriptions from file (supports .txt, .yaml, .yml)"""
         try:
             if isinstance(class_file_path, str):
                 class_file_path = Path(class_file_path)
@@ -722,17 +726,84 @@ class ImageBrowser(QMainWindow):
                 print(f"Class file not found: {class_file_path}")
                 return
             
-            with open(class_file_path, 'r', encoding='utf-8') as f:
-                self.classes = [line.strip() for line in f.readlines() if line.strip()]
+            self.classes = []
+            self.class_keystrokes = {}  # Dictionary mapping class index to keystroke
+            self.class_descriptions = {}  # Dictionary mapping class index to description
+            
+            file_extension = class_file_path.suffix.lower()
+            
+            if file_extension in ['.yaml', '.yml']:
+                # Load YAML format
+                with open(class_file_path, 'r', encoding='utf-8') as f:
+                    data = yaml.safe_load(f)
+                
+                if 'classes' in data and isinstance(data['classes'], list):
+                    for class_info in data['classes']:
+                        if isinstance(class_info, dict) and 'name' in class_info:
+                            class_name = class_info['name'].strip()
+                            if class_name:
+                                class_idx = len(self.classes)
+                                self.classes.append(class_name)
+                                
+                                # Get keystroke if specified
+                                if 'keystroke' in class_info and class_info['keystroke']:
+                                    keystroke = str(class_info['keystroke']).strip()
+                                    if keystroke:
+                                        self.class_keystrokes[class_idx] = keystroke
+                                
+                                # Get description if specified
+                                if 'description' in class_info and class_info['description']:
+                                    description = class_info['description'].strip()
+                                    if description:
+                                        self.class_descriptions[class_idx] = description
+                        elif isinstance(class_info, str):
+                            # Simple string format in YAML
+                            class_name = class_info.strip()
+                            if class_name:
+                                self.classes.append(class_name)
+                else:
+                    print(f"Invalid YAML format: expected 'classes' list in {class_file_path}")
+                    return
+                    
+            else:
+                # Load text format (.txt or other)
+                with open(class_file_path, 'r', encoding='utf-8') as f:
+                    for line_num, line in enumerate(f.readlines()):
+                        line = line.strip()
+                        if not line or line.startswith('#'):  # Skip empty lines and comments
+                            continue
+                        
+                        # Support both old format (class name only) and new format (class:keystroke)
+                        if ':' in line:
+                            class_name, keystroke = line.split(':', 1)
+                            class_name = class_name.strip()
+                            keystroke = keystroke.strip()
+                            
+                            if class_name:
+                                class_idx = len(self.classes)
+                                self.classes.append(class_name)
+                                if keystroke:  # Only assign if keystroke is not empty
+                                    self.class_keystrokes[class_idx] = keystroke
+                        else:
+                            # Old format - just class name
+                            class_name = line.strip()
+                            if class_name:
+                                self.classes.append(class_name)
             
             self.class_file_path = class_file_path
             print(f"Loaded {len(self.classes)} classes from {class_file_path}")
+            if self.class_keystrokes:
+                print(f"Custom keystrokes assigned: {self.class_keystrokes}")
+            if self.class_descriptions:
+                print(f"Class descriptions loaded for {len(self.class_descriptions)} classes")
             
             # Update UI
             self.update_class_info_label()
             
         except Exception as e:
             print(f"Error loading class file: {e}")
+            import traceback
+            traceback.print_exc()
     
     def update_class_info_label(self):
         """Update the class info label"""
@@ -792,25 +863,43 @@ class ImageBrowser(QMainWindow):
         # Enable the menu
         self.classes_menu.setEnabled(True)
         
-        # Add action for each class (up to 12 classes with Shift+F-key shortcuts)
+        # Add action for each class with custom or default shortcuts
         for i, class_name in enumerate(self.classes):
-            if i < 12:  # Only first 12 classes get function key shortcuts
-                f_key = f"Shift+F{i+1}"
+            # Get description if available
+            description = self.class_descriptions.get(i, "")
+            description_suffix = f" - {description}" if description else ""
+            
+            # Check if this class has a custom keystroke
+            if i in self.class_keystrokes:
+                # Use custom keystroke
+                keystroke = self.class_keystrokes[i]
                 action_text = f"&{class_name}"
                 action = QAction(action_text, self)
-                action.setShortcut(QKeySequence(f_key))
-                action.setStatusTip(f'Assign selected images to class "{class_name}" ({f_key})')
+                action.setShortcut(QKeySequence(keystroke))
+                action.setStatusTip(f'Assign selected images to class "{class_name}" ({keystroke}){description_suffix}')
                 
                 # Fix closure issue by using proper closure
                 action.triggered.connect(self.create_class_assignment_handler(i))
                 
                 self.classes_menu.addAction(action)
-                print(f"DEBUG: Created menu action with shortcut {f_key} for class '{class_name}' (index {i})")
+                print(f"DEBUG: Created menu action with custom shortcut '{keystroke}' for class '{class_name}' (index {i})")
+            elif i < 12:  # Only first 12 classes get default function key shortcuts (if no custom keystroke)
+                f_key = f"Shift+F{i+1}"
+                action_text = f"&{class_name}"
+                action = QAction(action_text, self)
+                action.setShortcut(QKeySequence(f_key))
+                action.setStatusTip(f'Assign selected images to class "{class_name}" ({f_key}){description_suffix}')
+                
+                # Fix closure issue by using proper closure
+                action.triggered.connect(self.create_class_assignment_handler(i))
+                
+                self.classes_menu.addAction(action)
+                print(f"DEBUG: Created menu action with default shortcut {f_key} for class '{class_name}' (index {i})")
             else:
-                # Classes beyond F12 don't get shortcuts but are still in the menu
+                # Classes beyond F12 with no custom keystroke don't get shortcuts but are still in the menu
                 action_text = f"{class_name}"
                 action = QAction(action_text, self)
-                action.setStatusTip(f'Assign selected images to class "{class_name}" (no shortcut)')
+                action.setStatusTip(f'Assign selected images to class "{class_name}" (no shortcut){description_suffix}')
                 
                 # Fix closure issue by using proper closure
                 action.triggered.connect(self.create_class_assignment_handler(i))
@@ -827,9 +916,19 @@ class ImageBrowser(QMainWindow):
         enter_action.triggered.connect(self.assign_to_last_used_class)
         self.classes_menu.addAction(enter_action)
         
-        # Add info action for classes beyond F12
-        if len(self.classes) > 12:
-            info_action = QAction(f'Classes {13}-{len(self.classes)} have no shortcuts', self)
+        # Add info action for classes without shortcuts
+        classes_without_shortcuts = []
+        for i, class_name in enumerate(self.classes):
+            if i not in self.class_keystrokes and i >= 12:
+                classes_without_shortcuts.append((i+1, class_name))
+        
+        if classes_without_shortcuts:
+            class_numbers = [str(num) for num, _ in classes_without_shortcuts]
+            if len(class_numbers) > 3:
+                display_range = f"{class_numbers[0]}-{class_numbers[-1]}"
+            else:
+                display_range = ", ".join(class_numbers)
+            info_action = QAction(f'Classes {display_range} have no shortcuts', self)
             info_action.setEnabled(False)
             self.classes_menu.addAction(info_action)
     
@@ -947,7 +1046,8 @@ class ImageBrowser(QMainWindow):
                     item = self.model.item(index.row())
                     if item:
                         category_info = self.image_categories[filename]
-                        tooltip = f"{filename}\nClass: {category_info['class_name']} (ID: {category_info['class_id']})"
+                        display_name = os.path.basename(filename)
+                        tooltip = f"File: {display_name}\nClass: {category_info['class_name']} (ID: {category_info['class_id']})"
                         item.setToolTip(tooltip)
         
         if hidden_count > 0:
@@ -956,17 +1056,22 @@ class ImageBrowser(QMainWindow):
             self.loaded_images = set(i for i in self.loaded_images if i < len(self.image_files))
     
     def update_model_with_categories(self):
-        """Update model items to show assigned categories"""
+        """Update model items to show assigned categories and filenames in tooltips"""
         for row in range(self.model.rowCount()):
             item = self.model.item(row)
             if item:
                 filename = item.data(Qt.UserRole)
-                if filename in self.image_categories:
-                    category_info = self.image_categories[filename]
-                    tooltip = f"{filename}\nClass: {category_info['class_name']} (ID: {category_info['class_id']})"
-                    item.setToolTip(tooltip)
-                else:
-                    item.setToolTip(filename)
+                if filename:
+                    # Extract just the filename without path
+                    display_name = os.path.basename(filename)
+                    
+                    if filename in self.image_categories:
+                        category_info = self.image_categories[filename]
+                        tooltip = f"File: {display_name}\nClass: {category_info['class_name']} (ID: {category_info['class_id']})"
+                        item.setToolTip(tooltip)
+                    else:
+                        tooltip = f"File: {display_name}\nClass: Unallocated"
+                        item.setToolTip(tooltip)
 
     def load_folder(self):
         npz_file, _ = QFileDialog.getOpenFileName(
@@ -1049,6 +1154,16 @@ class ImageBrowser(QMainWindow):
             item.setIcon(self.placeholder_icon)
             item.setEditable(False)
             item.setData(file, Qt.UserRole)  # Store filename in user data
+            
+            # Set initial tooltip
+            display_name = os.path.basename(file)
+            if file in self.image_categories:
+                category_info = self.image_categories[file]
+                tooltip = f"File: {display_name}\nClass: {category_info['class_name']} (ID: {category_info['class_id']})"
+            else:
+                tooltip = f"File: {display_name}\nClass: Unallocated"
+            item.setToolTip(tooltip)
+            
             self.model.appendRow(item)
         
         print(f"Added {self.model.rowCount()} items to model")
@@ -1061,8 +1176,8 @@ class ImageBrowser(QMainWindow):
         
         # Load first batch immediately
         if self.image_files:
-            # Load first 30 images immediately (larger batch for initial load)
-            initial_batch_size = min(30, len(self.image_files))
+            # Load first 50 images immediately (larger batch for initial load)
+            initial_batch_size = min(50, len(self.image_files))
             print(f"Loading initial batch of {initial_batch_size} images")
             self.load_image_batch(0, initial_batch_size)
             
@@ -1091,7 +1206,7 @@ class ImageBrowser(QMainWindow):
         grid_height = self.view.gridSize().height()
         
         cols = max(1, view_width // grid_width)
-        rows_visible = max(1, view_height // grid_height) + 2  # Add buffer
+        rows_visible = max(1, view_height // grid_height) + 4  # Add larger buffer for smoother scrolling
         
         # Get scroll position
         scroll_value = self.view.verticalScrollBar().value()
@@ -1159,7 +1274,7 @@ class ImageBrowser(QMainWindow):
     def start_background_loading(self):
         """Start background loading of remaining images"""
         if not self.background_load_timer.isActive():
-            self.background_load_timer.start(500)  # Load batch every 500ms
+            self.background_load_timer.start(250)  # Load batch every 250ms for faster loading
     
     def stop_background_loading(self):
         """Stop background loading"""
@@ -1172,7 +1287,7 @@ class ImageBrowser(QMainWindow):
             return
             
         # Find the next unloaded batch
-        batch_size = 10  # Smaller batches for background loading
+        batch_size = 25  # Larger batches for faster background loading
         start_idx = None
         
         for i in range(0, len(self.image_files), batch_size):
@@ -1208,6 +1323,17 @@ class ImageBrowser(QMainWindow):
         # Always update the icon - Qt's model-view handles visibility efficiently
         # and we need icons ready for when items become visible through scrolling
         item.setIcon(icon)
+        
+        # Set tooltip with filename and category info
+        filename = item.data(Qt.UserRole)
+        if filename:
+            display_name = os.path.basename(filename)
+            if filename in self.image_categories:
+                category_info = self.image_categories[filename]
+                tooltip = f"File: {display_name}\nClass: {category_info['class_name']} (ID: {category_info['class_id']})"
+            else:
+                tooltip = f"File: {display_name}\nClass: Unallocated"
+            item.setToolTip(tooltip)
     
     def on_scroll(self):
         """Handle scroll events for lazy loading"""
@@ -1287,6 +1413,16 @@ class ImageBrowser(QMainWindow):
                 item.setIcon(self.placeholder_icon)
             item.setEditable(False)
             item.setData(file, Qt.UserRole)
+            
+            # Set tooltip
+            display_name = os.path.basename(file)
+            if file in self.image_categories:
+                category_info = self.image_categories[file]
+                tooltip = f"File: {display_name}\nClass: {category_info['class_name']} (ID: {category_info['class_id']})"
+            else:
+                tooltip = f"File: {display_name}\nClass: Unallocated"
+            item.setToolTip(tooltip)
+            
             self.model.appendRow(item)
         
         # Update loaded_images set to reflect new order
@@ -1358,13 +1494,23 @@ class ImageBrowser(QMainWindow):
             item.setIcon(self.placeholder_icon)
             item.setEditable(False)
             item.setData(file, Qt.UserRole)
+            
+            # Set tooltip
+            display_name = os.path.basename(file)
+            if file in self.image_categories:
+                category_info = self.image_categories[file]
+                tooltip = f"File: {display_name}\nClass: {category_info['class_name']} (ID: {category_info['class_id']})"
+            else:
+                tooltip = f"File: {display_name}\nClass: Unallocated"
+            item.setToolTip(tooltip)
+            
             self.model.appendRow(item)
         
         print(f"Reloaded: Found {len(self.image_files)} visible images")
         
         # Load first batch immediately
         if self.image_files:
-            self.load_image_batch(0, min(20, len(self.image_files)))
+            self.load_image_batch(0, min(40, len(self.image_files)))
     
     def save_hidden_flags(self):
         """Save hidden flags and categories back to the npz file"""
@@ -1466,6 +1612,16 @@ class ImageBrowser(QMainWindow):
             item.setIcon(self.placeholder_icon)
             item.setEditable(False)
             item.setData(file, Qt.UserRole)
+            
+            # Set tooltip
+            display_name = os.path.basename(file)
+            if file in self.image_categories:
+                category_info = self.image_categories[file]
+                tooltip = f"File: {display_name}\nClass: {category_info['class_name']} (ID: {category_info['class_id']})"
+            else:
+                tooltip = f"File: {display_name}\nClass: Unallocated"
+            item.setToolTip(tooltip)
+            
             self.model.appendRow(item)
         
         # Update model with category information
@@ -1473,7 +1629,7 @@ class ImageBrowser(QMainWindow):
         
         # Load first batch immediately
         if self.image_files:
-            self.load_image_batch(0, min(20, len(self.image_files)))
+            self.load_image_batch(0, min(40, len(self.image_files)))
             QTimer.singleShot(100, self.load_visible_images)
 
     def resizeEvent(self, event):

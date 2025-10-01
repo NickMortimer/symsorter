@@ -1,0 +1,79 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Launch SymSorter GUI",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "symsorter.gui",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "python": "${workspaceFolder}/.venv/bin/python",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            }
+        },
+        {
+            "name": "Launch SymSorter GUI with YAML Classes",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/test_gui_yaml.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "python": "${workspaceFolder}/.venv/bin/python",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            }
+        },
+        {
+            "name": "Launch SymSorter CLI",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "symsorter.cli",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "python": "${workspaceFolder}/.venv/bin/python",
+            "justMyCode": false,
+            "args" :["--class-file","classes.yaml"],
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            }
+        },
+        {
+            "name": "CLIP Encode Images",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "symsorter.clip_encode",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "python": "${workspaceFolder}/.venv/bin/python",
+            "justMyCode": false,
+            "args": [
+                "encode",
+                "/home/mor582/thumbs_out/turtle_v01_run02",
+                "/home/mor582/thumbs_out_cluster/turtle_v01_run02",
+                "--doit-db", ".clip_encode.db",
+                "--model-type","dinov3"
+                "--crop-size", "224"
+            ],
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            }
+        },
+        {
+            "name": "Debug Current File",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "python": "${workspaceFolder}/.venv/bin/python",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            }
+        }
+    ]
+}
