@@ -461,7 +461,6 @@ def task_cluster_images():
 def doit_encode(
     ctx: typer.Context,
     input_dir: Path = typer.Argument(..., help="Directory containing image folders to process"),
-    recursive: bool = typer.Option(False, help="Process subdirectories recursively"),
     pattern: str = typer.Option("*.jpg", help="Image pattern to match"),
     doit_db: str = typer.Option(".doit-db", help="Path to doit database file"),
     batch_size: int = typer.Option(128, help="Batch size for processing images"),
@@ -484,7 +483,6 @@ def doit_encode(
     
     # Run doit with custom database location
     cfg.set('encode_input_dir', str(input_dir))
-    cfg.set('encode_recursive', recursive)
     cfg.set('encode_pattern', pattern)
     cfg.set('encode_batch_size', batch_size)
     cfg.set('encode_crop_size', crop_size)
