@@ -480,8 +480,6 @@ def doit_encode(
     Use doit to encode images in folders (for dependency tracking and incremental builds).
     """
     input_dir = Path(input_dir)
-    output_dir = Path(output_dir)
-    output_dir.mkdir(exist_ok=True, parents=True)
     doit_db = input_dir / doit_db 
     
     # Validate model type
