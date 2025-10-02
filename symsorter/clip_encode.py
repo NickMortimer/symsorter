@@ -33,40 +33,62 @@ def load_existing_embeddings(npz_path):
     """Helper function to load existing embeddings from npz file"""
     existing_embeddings = {}
     existing_dimensions = {}
+    metadata = {}
     if npz_path.exists():
         try:
             data = np.load(npz_path, allow_pickle=True)
             if 'embeddings' in data and 'filenames' in data:
-                existing_embeddings = dict(zip(data['filenames'], data['embeddings']))
+                # Ensure all filenames are strings to avoid Path object issues
+                filenames = [str(f) for f in data['filenames']]
+                existing_embeddings = dict(zip(filenames, data['embeddings']))
                 
                 # Load dimensions if available (for backward compatibility)
                 if 'dimensions' in data:
-                    existing_dimensions = dict(zip(data['filenames'], data['dimensions']))
+                    existing_dimensions = dict(zip(filenames, data['dimensions']))
+                
+                # Load metadata for concatenation compatibility
+                if 'crop_size' in data:
+                    # New format: array of crop sizes (should all be the same)
+                    metadata['crop_size'] = int(data['crop_size'][0])
+                
+                if 'model_type' in data:
+                    # New format: array of model types (should all be the same)
+                    metadata['model_type'] = str(data['model_type'][0])
                 
                 print(f"Loaded {len(existing_embeddings)} existing embeddings from {npz_path}")
+                if metadata:
+                    print(f"  Metadata: {metadata}")
         except Exception as e:
             print(f"Error loading existing embeddings: {e}")
-    return existing_embeddings, existing_dimensions
+    return existing_embeddings, existing_dimensions, metadata
 
-def save_folder_embeddings(npz_path, embeddings_dict, dimensions_dict=None):
+def save_folder_embeddings(npz_path, embeddings_dict, dimensions_dict=None, crop_size=0, model_type='clip'):
     """Helper function to save embeddings dictionary to npz file"""
     if not embeddings_dict:
         print(f"No embeddings to save for {npz_path}")
         return
     
-    filenames = list(embeddings_dict.keys())
+    # Convert all keys to strings to avoid pickle issues with Path objects
+    filenames = [str(key) for key in embeddings_dict.keys()]
     embeddings = np.array(list(embeddings_dict.values()))
     
-    # Prepare dimensions array if provided
+    # Create dimensions array in same order as filenames if provided
+    dimensions = None
+    if dimensions_dict:
+        original_keys = list(embeddings_dict.keys())
+        dimensions = np.array([dimensions_dict.get(key, (0, 0)) for key in original_keys])
+    
+    # Prepare save data - make crop_size and model_type arrays matching filenames length
+    crop_sizes = np.full(len(filenames), crop_size, dtype=np.int32)
+    model_types = np.full(len(filenames), model_type, dtype='<U20')  # String array with max 20 chars
+    
     save_data = {
         'embeddings': embeddings,
-        'filenames': filenames
+        'filenames': filenames,
+        'dimensions': dimensions,
+        'crop_size': crop_sizes,
+        'model_type': model_types
     }
-    
-    if dimensions_dict:
-        # Create dimensions array in same order as filenames
-        dimensions = [dimensions_dict.get(filename, (0, 0)) for filename in filenames]
-        save_data['dimensions'] = np.array(dimensions)
     
     npz_path.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(npz_path, **save_data)
@@ -217,18 +239,26 @@ def task_encode_folders():
             if npz_path != current_npz_path:
                 if current_npz_path is not None:
                     # Save previous folder's data
-                    save_folder_embeddings(current_npz_path, existing_embeddings, existing_dimensions)
+                    save_folder_embeddings(current_npz_path, existing_embeddings, existing_dimensions, crop_size, model_type)
 
                 # Load existing embeddings for new folder
                 current_npz_path = npz_path
-                existing_embeddings, existing_dimensions = load_existing_embeddings(current_npz_path)
+                existing_embeddings, existing_dimensions, existing_metadata = load_existing_embeddings(current_npz_path)
+                
+                # Check compatibility if existing file has metadata
+                if existing_metadata:
+                    if existing_metadata.get('crop_size') != crop_size:
+                        print(f"Warning: crop_size mismatch in {npz_path}: existing={existing_metadata.get('crop_size')}, current={crop_size}")
+                    if existing_metadata.get('model_type') != model_type:
+                        print(f"Warning: model_type mismatch in {npz_path}: existing={existing_metadata.get('model_type')}, current={model_type}")
             
             # Add current image's embedding and dimensions if not already in existing
-            existing_embeddings[relative_name] = embedding
-            existing_dimensions[relative_name] = dimensions
+            # Convert to string to avoid pickle issues with Path objects
+            existing_embeddings[str(relative_name)] = embedding
+            existing_dimensions[str(relative_name)] = dimensions
         # Save the last folder
         if current_npz_path is not None:
-            save_folder_embeddings(current_npz_path, existing_embeddings, existing_dimensions)
+            save_folder_embeddings(current_npz_path, existing_embeddings, existing_dimensions, crop_size, model_type)
     crop_size = cfg.get('encode_crop_size', 0)
     model_type = cfg.get('encode_model_type', 'clip')
     input_dir = cfg.get_url('encode_input_dir')
@@ -261,7 +291,9 @@ def task_encode_folders():
         # Check each file in this group
         for file_path in file_paths:
             relative_name = file_path.relative_to(npz_path.parent)
-            if str(relative_name) not in existing_filenames:
+            # Always convert to string for consistent comparison
+            relative_name_str = str(relative_name)
+            if relative_name_str not in existing_filenames:
                 files_to_process.append(file_path)
     
     # Only create targets for folders that have files to process
@@ -553,6 +585,20 @@ def inspect(
             typer.echo(f"Number of files: {len(filenames)}")
             typer.echo(f"First 5 filenames: {filenames[:5]}")
         
+        if 'dimensions' in data:
+            dimensions = data['dimensions']
+            typer.echo(f"Dimensions shape: {dimensions.shape if dimensions is not None else 'None'}")
+            if dimensions is not None and len(dimensions) > 0:
+                typer.echo(f"First 5 dimensions: {dimensions[:5]}")
+        
+        if 'crop_size' in data:
+            crop_size_data = data['crop_size']
+            typer.echo(f"Crop size: {crop_size_data[0]} (array of {len(crop_size_data)} values)")
+        
+        if 'model_type' in data:
+            model_type_data = data['model_type']
+            typer.echo(f"Model type: {model_type_data[0]} (array of {len(model_type_data)} values)")
+        
         if 'folder_name' in data:
             typer.echo(f"Folder name: {data['folder_name']}")
         
@@ -571,7 +617,9 @@ def load_image_dimensions(npz_path):
     try:
         data = np.load(npz_path, allow_pickle=True)
         if 'dimensions' in data and 'filenames' in data:
-            dimensions_dict = dict(zip(data['filenames'], data['dimensions']))
+            # Ensure all filenames are strings to avoid Path object issues
+            filenames = [str(f) for f in data['filenames']]
+            dimensions_dict = dict(zip(filenames, data['dimensions']))
             return dimensions_dict
         else:
             # For backward compatibility with old NPZ files without dimensions
@@ -605,5 +653,86 @@ def get_image_dimensions_cached(image_path, crop_size=0, model_type='clip'):
         print(f"Error getting dimensions for {image_path}: {e}")
         return (0, 0)
 
-if __name__ == "__main__":
-    app()
+def concatenate_npz_files(npz_paths, output_path):
+    """Concatenate multiple compatible NPZ files into one"""
+    if not npz_paths:
+        print("No NPZ files provided for concatenation")
+        return False
+    
+    all_embeddings = {}
+    all_dimensions = {}
+    reference_metadata = None
+    
+    for npz_path in npz_paths:
+        embeddings, dimensions, metadata = load_existing_embeddings(npz_path)
+        
+        if not embeddings:
+            print(f"Skipping empty file: {npz_path}")
+            continue
+        
+        # Check compatibility
+        if reference_metadata is None:
+            reference_metadata = metadata
+        else:
+            if metadata.get('crop_size') != reference_metadata.get('crop_size'):
+                print(f"Error: crop_size mismatch in {npz_path}")
+                return False
+            if metadata.get('model_type') != reference_metadata.get('model_type'):
+                print(f"Error: model_type mismatch in {npz_path}")
+                return False
+        
+        # Add embeddings and dimensions (check for duplicates)
+        for filename, embedding in embeddings.items():
+            if filename in all_embeddings:
+                print(f"Warning: duplicate filename '{filename}' in {npz_path}, skipping")
+                continue
+            all_embeddings[filename] = embedding
+            if dimensions and filename in dimensions:
+                all_dimensions[filename] = dimensions[filename]
+        
+        print(f"Added {len(embeddings)} embeddings from {npz_path}")
+    
+    if not all_embeddings:
+        print("No embeddings to save after concatenation")
+        return False
+    
+    # Save concatenated file
+    save_folder_embeddings(
+        output_path, 
+        all_embeddings, 
+        all_dimensions if all_dimensions else None,
+        reference_metadata.get('crop_size', 0),
+        reference_metadata.get('model_type', 'clip')
+    )
+    
+    print(f"Successfully concatenated {len(npz_paths)} files into {output_path}")
+    print(f"Total embeddings: {len(all_embeddings)}")
+    return True
+
+@app.command()
+def concatenate(
+    output_file: Path = typer.Argument(..., help="Output NPZ file path"),
+    input_files: list[Path] = typer.Argument(..., help="Input NPZ files to concatenate")
+):
+    """
+    Concatenate multiple compatible NPZ embedding files into one.
+    All files must have the same crop_size and model_type.
+    """
+    # Validate input files
+    missing_files = [f for f in input_files if not f.exists()]
+    if missing_files:
+        typer.echo(f"Error: Missing files: {missing_files}")
+        raise typer.Exit(1)
+    
+    if len(input_files) < 2:
+        typer.echo("Error: Need at least 2 files to concatenate")
+        raise typer.Exit(1)
+    
+    # Perform concatenation
+    success = concatenate_npz_files(input_files, output_file)
+    
+    if success:
+        typer.echo(f"✅ Successfully concatenated {len(input_files)} files into {output_file}")
+    else:
+        typer.echo("❌ Concatenation failed")
+        raise typer.Exit(1)
