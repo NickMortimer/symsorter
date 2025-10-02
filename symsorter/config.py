@@ -3,8 +3,6 @@ import yaml
 
 import pandas as pd
 import shutil
-import tkinter as tk
-from tkinter import filedialog
 from pathlib import Path
 
 class Config:
@@ -16,9 +14,7 @@ class Config:
             self.load(self.path)
 
     def ask_config_file(self):
-        root = tk.Tk()
-        root.withdraw()
-        return filedialog.askopenfilename()
+        raise RuntimeError("GUI file dialog not available. Please specify config file path directly.")
 
     def load(self, path):
         # this should update the cfg instead of replacing it

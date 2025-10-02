@@ -1,0 +1,38 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Launch SymSorter GUI",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "symsorter.gui",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "python": "${workspaceFolder}/.venv/bin/python",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            }
+        },
+        {
+            "name": "CLIP Encode Images",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "symsorter.clip_encode",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "python": "${workspaceFolder}/.venv/bin/python",
+            "justMyCode": false,
+            "args": [
+                "encode",
+                "/path/to/your/input/directory",
+                "--doit-db", ".clip_encode.db",
+                "--model-type", "dinov3",
+                "--crop-size", "224"
+            ],
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            }
+        }
+    ]
+}

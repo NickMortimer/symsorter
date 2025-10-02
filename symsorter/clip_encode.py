@@ -77,7 +77,7 @@ def save_folder_embeddings(npz_path, embeddings_dict, dimensions_dict=None):
 def load_dinov3_model(model_name='dinov2-base', device='cuda'):
     """Load DINOv3 model and preprocessing function."""
     # You can use 'dinov2-small', 'dinov2-base', 'dinov2-large', 'dinov2-giant'
-    processor = AutoImageProcessor.from_pretrained(f'facebook/{model_name}')
+    processor = AutoImageProcessor.from_pretrained(f'facebook/{model_name}', use_fast=True)
     model = Dinov2Model.from_pretrained(f'facebook/{model_name}')
     model = model.to(device)
     model.eval()
