@@ -4,7 +4,7 @@ from PySide6.QtWidgets import (
     QToolBar, QMenuBar, QMainWindow, QMessageBox
 )
 from PySide6.QtGui import QPixmap, QIcon, QStandardItemModel, QStandardItem, QKeySequence, QShortcut, QAction
-from PySide6.QtCore import Qt, QSize, QThread, Signal, QTimer, QThreadPool, QRunnable, QObject
+from PySide6.QtCore import Qt, QSize, QThread, Signal, QTimer, QThreadPool, QRunnable, QObject, QItemSelectionModel
 import sys
 import os
 import math
@@ -12,6 +12,8 @@ import numpy as np
 import traceback
 import argparse
 import yaml
+import json
+from datetime import datetime
 from pathlib import Path
 from .clip_encode import load_existing_embeddings
 
@@ -95,12 +97,23 @@ class ImageLoadWorker(QRunnable):
                 
                 processed_pixmap = processed_pixmap.copy(crop_x, crop_y, crop_width, crop_height)
             
-            # Scale to thumbnail size
-            scaled_pixmap = processed_pixmap.scaled(
-                QSize(self.icon_size, self.icon_size),
-                Qt.KeepAspectRatio,
-                Qt.SmoothTransformation
-            )
+            # Scale to thumbnail size - always scale to match the requested icon size
+            if self.icon_size == processed_pixmap.width() and self.icon_size == processed_pixmap.height():
+                # Already the exact size, no scaling needed
+                scaled_pixmap = processed_pixmap
+            else:
+                # Scale to requested thumbnail size
+                # Use smooth transformation for upscaling or significant downscaling
+                if self.icon_size > processed_pixmap.width() or processed_pixmap.width() > self.icon_size * 2:
+                    transformation = Qt.SmoothTransformation  # Smooth for upscaling or major downscaling
+                else:
+                    transformation = Qt.FastTransformation    # Fast for minor downscaling
+                
+                scaled_pixmap = processed_pixmap.scaled(
+                    QSize(self.icon_size, self.icon_size),
+                    Qt.KeepAspectRatio,
+                    transformation
+                )
             
             if self.should_stop:
                 return
@@ -191,10 +204,11 @@ class ImageBrowser(QMainWindow):
         self.original_order = []  # Store original order for reset
         self.npz_file_path = None  # Store path to npz file for saving
         
-        # Smart image caching system
+        # Smart image caching system optimized for 224x224 images
         self.image_cache = {}  # Cache for processed thumbnails: {(filename, icon_size, crop_size): QIcon}
         self.raw_image_cache = {}  # Cache for raw QPixmap images: {filename: QPixmap}
-        self.max_cache_size = 10000  # Maximum number of images to keep in cache
+        self.max_cache_size = 8000  # Maximum number of processed icons to keep in cache
+        self.max_raw_cache_size = 1000  # Maximum number of raw images to keep in cache (224x224 are small)
         self.cache_access_order = []  # Track access order for LRU eviction
         
         # Track unsaved changes
@@ -208,21 +222,21 @@ class ImageBrowser(QMainWindow):
         self.class_file_path = class_file
         self.last_used_class_idx = None  # Track last used class for Enter key
         
-        # Icon and crop settings
-        self.icon_sizes = {"Small": 80, "Medium": 120, "Large": 320, "Extra Large": 640}
+        # Icon and crop settings optimized for 224x224 source images
+        self.icon_sizes = {"Small": 64, "Medium": 112, "Large": 224, "Extra Large": 320}
         self.current_size_name = "Medium"
         self.icon_size = self.icon_sizes[self.current_size_name]  # Current icon size
-        self.crop_sizes = {"64": 64, "128": 128, "none": None}
+        self.crop_sizes = {"64": 64, "112": 112, "128": 128, "224": 224, "none": None}
         self.current_crop_name = "none"
         self.crop_size = self.crop_sizes[self.current_crop_name]  # Current crop size (None = no crop)
 
         # Create a simple placeholder icon (will be updated with zoom)
         self.update_placeholder_icon()
         
-        # Thread pool for faster image loading
+        # Thread pool for faster image loading - optimized for small 224x224 images
         self.thread_pool = QThreadPool()
-        # Set max threads to CPU count * 3 (good for I/O bound tasks like image loading)
-        max_threads = min(16, QThreadPool.globalInstance().maxThreadCount() * 3)
+        # Set max threads higher for small images (CPU count * 4, max 24)
+        max_threads = min(24, QThreadPool.globalInstance().maxThreadCount() * 4)
         self.thread_pool.setMaxThreadCount(max_threads)
         self.active_workers = []  # Keep references to active workers
         self.background_load_timer = QTimer()  # Timer for background loading
@@ -295,11 +309,27 @@ class ImageBrowser(QMainWindow):
         save_action = QAction('&Save Classifications', self)
         save_action.setShortcut(QKeySequence('Ctrl+S'))
         save_action.setStatusTip('Save classifications and hidden flags')
-        save_action.triggered.connect(self.save_hidden_flags)
+        save_action.triggered.connect(self.save_classifications)
         file_menu.addAction(save_action)
         
-        # Export action
-        export_action = QAction('&Export YOLO Annotations...', self)
+        file_menu.addSeparator()
+        
+        # Export JSON action
+        export_json_action = QAction('Export &Classifications (JSON)...', self)
+        export_json_action.setShortcut(QKeySequence('Ctrl+J'))
+        export_json_action.setStatusTip('Export classifications as COCO-style JSON')
+        export_json_action.triggered.connect(self.export_classifications_json_dialog)
+        file_menu.addAction(export_json_action)
+        
+        # Import JSON action
+        import_json_action = QAction('&Import Classifications (JSON)...', self)
+        import_json_action.setShortcut(QKeySequence('Ctrl+Shift+J'))
+        import_json_action.setStatusTip('Import classifications from COCO-style JSON')
+        import_json_action.triggered.connect(self.import_classifications_json_dialog)
+        file_menu.addAction(import_json_action)
+        
+        # Export YOLO action
+        export_action = QAction('Export &YOLO Annotations...', self)
         export_action.setShortcut(QKeySequence('Ctrl+E'))
         export_action.setStatusTip('Export classifications as YOLO annotations')
         export_action.triggered.connect(self.export_yolo_annotations)
@@ -604,9 +634,9 @@ class ImageBrowser(QMainWindow):
         return None
     
     def cache_raw_image(self, filename, pixmap):
-        """Cache a raw QPixmap with size limits"""
-        # Only cache if image is reasonably sized (< 2K resolution)
-        if pixmap.width() <= 2048 and pixmap.height() <= 2048:
+        """Cache a raw QPixmap with size limits - optimized for 224x224 images"""
+        # Cache all images since they're small (224x224 max), but still have a reasonable upper limit
+        if pixmap.width() <= 1024 and pixmap.height() <= 1024:  # Allow larger than 224x224 just in case
             self.raw_image_cache[filename] = pixmap
             
             # Update access order
@@ -615,8 +645,7 @@ class ImageBrowser(QMainWindow):
             self.cache_access_order.append(filename)
             
             # Evict old raw images if we have too many
-            max_raw_cache = 50  # Keep fewer raw images due to memory usage
-            while len(self.raw_image_cache) > max_raw_cache:
+            while len(self.raw_image_cache) > self.max_raw_cache_size:
                 # Find oldest raw image in access order
                 for old_filename in list(self.cache_access_order):
                     if old_filename in self.raw_image_cache:
@@ -661,10 +690,14 @@ class ImageBrowser(QMainWindow):
         
         # Update grid and icon sizes for the view
         if self.model.rowCount() > 0:
-            padding = 5
+            # Use larger padding for bigger icons to prevent overlap
+            padding = max(10, self.icon_size // 20)  # Minimum 10px, or 5% of icon size
             grid_size = self.icon_size + padding
             self.view.setGridSize(QSize(grid_size, grid_size))
             self.view.setIconSize(QSize(self.icon_size, self.icon_size))
+            # Update spacing for larger icons
+            spacing = max(2, self.icon_size // 50)  # Minimum 2px, scales with icon size
+            self.view.setSpacing(spacing)
             
             # Reload all images with new thumbnail size
             self.reload_images_with_new_size()
@@ -833,6 +866,9 @@ class ImageBrowser(QMainWindow):
         # Store current selection
         current_text = self.class_filter_combo.currentText()
         
+        # Temporarily block signals to prevent triggering filter changes
+        self.class_filter_combo.blockSignals(True)
+        
         # Clear and repopulate
         self.class_filter_combo.clear()
         self.class_filter_combo.addItem("All Images")
@@ -846,6 +882,9 @@ class ImageBrowser(QMainWindow):
         index = self.class_filter_combo.findText(current_text)
         if index >= 0:
             self.class_filter_combo.setCurrentIndex(index)
+        
+        # Re-enable signals
+        self.class_filter_combo.blockSignals(False)
     
     def update_classes_menu(self):
         """Update the classes menu with loaded classes and their shortcuts"""
@@ -964,18 +1003,12 @@ class ImageBrowser(QMainWindow):
                             and filename in self.image_categories
                             and self.image_categories[filename]['class_name'] == filter_text]
         
-        # Check if we need to add new images that aren't in current model
-        current_files_set = set(self.image_files)
-        visible_files_set = set(visible_files)
+        # Always update the image_files list first
+        self.image_files = visible_files
         
-        # If the visible set is completely different, do a full rebuild
-        if len(visible_files_set - current_files_set) > len(visible_files_set) * 0.5:
-            self.image_files = visible_files
-            self.rebuild_model_after_filter()
-        else:
-            # Just update the current list efficiently
-            self.image_files = visible_files
-            self.apply_filter_to_existing_model(visible_files_set)
+        # For simplicity and performance, always do a full rebuild
+        # The complexity of partial updates isn't worth the minimal performance gain
+        self.rebuild_model_after_filter()
         
         print(f"Filtered to {len(self.image_files)} images for '{filter_text}'")
     
@@ -1009,6 +1042,9 @@ class ImageBrowser(QMainWindow):
                     'class_name': class_name
                 }
                 assigned_count += 1
+                print(f"DEBUG: Assigned '{filename}' to class '{class_name}'")
+            else:
+                print(f"DEBUG: No filename found for index at row {index.row()}")
         
         # Mark as having unsaved changes
         if assigned_count > 0:
@@ -1032,23 +1068,40 @@ class ImageBrowser(QMainWindow):
         for index in sorted(indexes, key=lambda x: x.row(), reverse=True):
             filename = index.data(Qt.UserRole)
             if filename and filename in self.image_categories:
-                # Only remove if we're in "Unallocated" mode
-                # In other modes, the image might still be relevant to show
+                category_info = self.image_categories[filename]
+                assigned_class = category_info['class_name']
+                
+                should_hide = False
+                
                 if current_filter == "Unallocated":
+                    # Always hide newly classified images from "Unallocated" filter
+                    should_hide = True
+                elif current_filter == "All Images":
+                    # Keep showing in "All Images" filter - they're still valid
+                    should_hide = False
+                elif current_filter in self.classes:
+                    # For specific class filters, hide if the assigned class doesn't match the filter
+                    should_hide = (assigned_class != current_filter)
+                else:
+                    # Unknown filter, don't hide
+                    should_hide = False
+                
+                if should_hide:
                     # Remove from current image_files list
                     if filename in self.image_files:
                         self.image_files.remove(filename)
                     # Remove from model
                     self.model.removeRow(index.row())
                     hidden_count += 1
+                    print(f"DEBUG: Hiding '{filename}' (assigned to '{assigned_class}') from filter '{current_filter}'")
                 else:
-                    # In other filter modes, just update the tooltip but don't remove
+                    # Just update the tooltip but don't remove
                     item = self.model.item(index.row())
                     if item:
-                        category_info = self.image_categories[filename]
                         display_name = os.path.basename(filename)
-                        tooltip = f"File: {display_name}\nClass: {category_info['class_name']} (ID: {category_info['class_id']})"
+                        tooltip = f"File: {display_name}\nClass: {assigned_class} (ID: {category_info['class_id']})"
                         item.setToolTip(tooltip)
+                        print(f"DEBUG: Keeping '{filename}' (assigned to '{assigned_class}') in filter '{current_filter}'")
         
         if hidden_count > 0:
             print(f"Auto-hidden {hidden_count} classified images from view")
@@ -1096,28 +1149,17 @@ class ImageBrowser(QMainWindow):
         self.npz_file_path = npz_path
         
         print(f"Loading embeddings from {npz_path}")
-        self.embeddings = load_existing_embeddings(npz_path)
+        self.embeddings, self.cached_dimensions = load_existing_embeddings(npz_path)
         
-        # Load hidden flags and categories from npz file if they exist
+        # Load hidden flags and categories from JSON file only
         self.hidden_flags = {}
         self.image_categories = {}
-        try:
-            data = np.load(npz_path, allow_pickle=True)
-            if 'hidden_flags' in data:
-                # Convert numpy array back to dict
-                hidden_array = data['hidden_flags'].item()
-                if isinstance(hidden_array, dict):
-                    self.hidden_flags = hidden_array
-                    print(f"Loaded {len(self.hidden_flags)} hidden flags")
-            
-            if 'categories' in data:
-                # Load category assignments
-                categories_array = data['categories'].item()
-                if isinstance(categories_array, dict):
-                    self.image_categories = categories_array
-                    print(f"Loaded {len(self.image_categories)} category assignments")
-        except Exception as e:
-            print(f"No additional data found or error loading: {e}")
+        
+        # Load from JSON file (only format for classifications now)
+        json_loaded = self.load_classifications_json()
+        
+        if not json_loaded:
+            print("No classifications JSON file found - starting with empty classifications")
         
         # Clear unsaved changes flag when loading new data
         self.has_unsaved_changes = False
@@ -1168,16 +1210,20 @@ class ImageBrowser(QMainWindow):
         
         print(f"Added {self.model.rowCount()} items to model")
         
-        # Set initial grid and icon sizes (fixed size, doesn't change with zoom)
-        padding = 5
+        # Set initial grid and icon sizes with appropriate padding
+        # Use larger padding for bigger icons to prevent overlap
+        padding = max(10, self.icon_size // 20)  # Minimum 10px, or 5% of icon size
         grid_size = self.icon_size + padding
         self.view.setGridSize(QSize(grid_size, grid_size))
         self.view.setIconSize(QSize(self.icon_size, self.icon_size))
+        # Set spacing that scales with icon size
+        spacing = max(2, self.icon_size // 50)  # Minimum 2px, scales with icon size
+        self.view.setSpacing(spacing)
         
         # Load first batch immediately
         if self.image_files:
-            # Load first 50 images immediately (larger batch for initial load)
-            initial_batch_size = min(50, len(self.image_files))
+            # Load first 100 images immediately (larger batch for initial load with small 224x224 images)
+            initial_batch_size = min(100, len(self.image_files))
             print(f"Loading initial batch of {initial_batch_size} images")
             self.load_image_batch(0, initial_batch_size)
             
@@ -1274,7 +1320,7 @@ class ImageBrowser(QMainWindow):
     def start_background_loading(self):
         """Start background loading of remaining images"""
         if not self.background_load_timer.isActive():
-            self.background_load_timer.start(250)  # Load batch every 250ms for faster loading
+            self.background_load_timer.start(150)  # Load batch every 150ms for faster loading with small images
     
     def stop_background_loading(self):
         """Stop background loading"""
@@ -1287,7 +1333,7 @@ class ImageBrowser(QMainWindow):
             return
             
         # Find the next unloaded batch
-        batch_size = 25  # Larger batches for faster background loading
+        batch_size = 50  # Larger batches for faster background loading with small 224x224 images
         start_idx = None
         
         for i in range(0, len(self.image_files), batch_size):
@@ -1385,10 +1431,10 @@ class ImageBrowser(QMainWindow):
         # Reorder the image files list
         self.image_files = [item[0] for item in similarities]
         
-        # Clear and rebuild the model with new order
-        self.rebuild_model()
+        # Clear and rebuild the model with new order, and scroll to the clicked image
+        self.rebuild_model(filename)
     
-    def rebuild_model(self):
+    def rebuild_model(self, scroll_to_filename=None):
         """Rebuild the model with current image order, preserving loaded icons"""
         # Store existing icons before clearing
         existing_icons = {}
@@ -1405,7 +1451,8 @@ class ImageBrowser(QMainWindow):
         # Don't clear loaded_images - we want to keep track of what's already loaded
         
         # Create items for all images in new order, using existing icons where available
-        for file in self.image_files:
+        scroll_to_index = None
+        for i, file in enumerate(self.image_files):
             item = QStandardItem()
             if file in existing_icons:
                 item.setIcon(existing_icons[file])
@@ -1424,6 +1471,10 @@ class ImageBrowser(QMainWindow):
             item.setToolTip(tooltip)
             
             self.model.appendRow(item)
+            
+            # Remember the index of the file we want to scroll to
+            if scroll_to_filename and file == scroll_to_filename:
+                scroll_to_index = i
         
         # Update loaded_images set to reflect new order
         new_loaded_images = set()
@@ -1434,6 +1485,24 @@ class ImageBrowser(QMainWindow):
         
         # Load any visible images that aren't already loaded
         self.load_visible_images()
+        
+        # Scroll to and select the specified image if requested
+        if scroll_to_index is not None:
+            # Use QTimer to ensure the model is fully updated before scrolling
+            QTimer.singleShot(50, lambda: self.scroll_to_and_select_index(scroll_to_index))
+    
+    def scroll_to_and_select_index(self, index):
+        """Scroll to and select a specific index in the view"""
+        if index >= 0 and index < self.model.rowCount():
+            model_index = self.model.index(index, 0)
+            # Clear current selection
+            self.view.clearSelection()
+            # Select the item
+            self.view.setCurrentIndex(model_index)
+            self.view.selectionModel().select(model_index, QItemSelectionModel.Select)
+            # Scroll to make it visible (position at top)
+            self.view.scrollTo(model_index, QAbstractItemView.PositionAtTop)
+            print(f"Scrolled to and selected image at index {index}")
     
     def reset_order(self):
         """Reset images to original order"""
@@ -1512,28 +1581,21 @@ class ImageBrowser(QMainWindow):
         if self.image_files:
             self.load_image_batch(0, min(40, len(self.image_files)))
     
-    def save_hidden_flags(self):
-        """Save hidden flags and categories back to the npz file"""
+    def save_classifications(self):
+        """Save image classifications and hidden flags to JSON file (independent of embeddings)"""
         if not self.npz_file_path:
             print("No npz file loaded")
             return
             
         try:
-            # Load existing data
-            existing_data = dict(np.load(self.npz_file_path, allow_pickle=True))
-            
-            # Add or update hidden flags and categories
-            existing_data['hidden_flags'] = self.hidden_flags
-            existing_data['categories'] = self.image_categories
-            
-            # Save back to file
-            np.savez_compressed(self.npz_file_path, **existing_data)
+            # Save to JSON file only (classifications are independent of embeddings)
+            self.save_classifications_json()
             
             hidden_count = sum(1 for hidden in self.hidden_flags.values() if hidden)
             category_count = len(self.image_categories)
-            print(f"Saved to {self.npz_file_path}:")
-            print(f"  - {len(self.hidden_flags)} hidden flags ({hidden_count} hidden)")
-            print(f"  - {category_count} category assignments")
+            print(f"Saved classifications to JSON: {self.get_classifications_json_path()}")
+            print(f"  - {category_count} image classifications")
+            print(f"  - {hidden_count} hidden images")
             
             # Clear unsaved changes flag
             self.has_unsaved_changes = False
@@ -1541,6 +1603,104 @@ class ImageBrowser(QMainWindow):
             
         except Exception as e:
             print(f"Error saving data: {e}")
+    
+    def get_classifications_json_path(self):
+        """Get the path for the classifications JSON file"""
+        if not self.npz_file_path:
+            return None
+        return self.npz_file_path.with_suffix('.json')
+    
+    def save_classifications_json(self):
+        """Save classifications in COCO-style JSON format"""
+        if not self.npz_file_path:
+            return
+            
+        json_path = self.get_classifications_json_path()
+        coco_data = self.build_coco_data()
+        
+        # Save to JSON file
+        with open(str(json_path), 'w', encoding='utf-8') as f:
+            json.dump(coco_data, f, indent=2, ensure_ascii=False)
+        
+        print(f"Saved COCO-style classifications to {json_path}")
+        return str(json_path)
+    
+    def load_classifications_json(self, json_path=None):
+        """Load classifications from COCO-style JSON format"""
+        if json_path is None:
+            json_path = self.get_classifications_json_path()
+            
+        if not json_path or not json_path.exists():
+            print("No classifications JSON file found")
+            return False
+            
+        try:
+            with open(json_path, 'r', encoding='utf-8') as f:
+                coco_data = json.load(f)
+            
+            # Clear existing data
+            self.image_categories = {}
+            self.hidden_flags = {}
+            
+            # Load categories if not already loaded
+            if not self.classes and 'categories' in coco_data:
+                self.classes = []
+                self.class_keystrokes = {}
+                self.class_descriptions = {}
+                
+                for cat in coco_data['categories']:
+                    class_name = cat['name']
+                    class_id = cat['id']
+                    self.classes.append(class_name)
+                    
+                    if 'keystroke' in cat and cat['keystroke']:
+                        self.class_keystrokes[class_id] = cat['keystroke']
+                    if 'description' in cat and cat['description']:
+                        self.class_descriptions[class_id] = cat['description']
+                
+                print(f"Loaded {len(self.classes)} classes from JSON")
+                self.update_class_info_label()
+                self.update_classes_menu()
+            
+            # Create filename to image_id mapping
+            filename_to_image_id = {}
+            if 'images' in coco_data:
+                for img in coco_data['images']:
+                    filename = img['file_name']
+                    filename_to_image_id[filename] = img['id']
+                    
+                    # Load hidden flags
+                    if 'hidden' in img:
+                        self.hidden_flags[filename] = img['hidden']
+            
+            # Load annotations
+            if 'annotations' in coco_data:
+                for ann in coco_data['annotations']:
+                    image_id = ann['image_id']
+                    category_id = ann['category_id']
+                    
+                    # Find filename for this image_id
+                    filename = None
+                    for fname, img_id in filename_to_image_id.items():
+                        if img_id == image_id:
+                            filename = fname
+                            break
+                    
+                    if filename and category_id < len(self.classes):
+                        self.image_categories[filename] = {
+                            'class_id': category_id,
+                            'class_name': self.classes[category_id]
+                        }
+            
+            category_count = len(self.image_categories)
+            hidden_count = sum(1 for hidden in self.hidden_flags.values() if hidden)
+            print(f"Loaded from JSON: {category_count} classifications, {hidden_count} hidden images")
+            
+            return True
+            
+        except Exception as e:
+            print(f"Error loading classifications JSON: {e}")
+            return False
     
     def export_yolo_annotations(self):
         """Export category assignments as YOLO format annotations"""
@@ -1584,32 +1744,251 @@ class ImageBrowser(QMainWindow):
         
         print(f"Exported {exported_count} YOLO annotations to {export_path}")
         print(f"Classes file saved to {classes_file}")
+    
+    def export_classifications_json_dialog(self):
+        """Dialog to export classifications as JSON"""
+        if not self.image_categories:
+            QMessageBox.information(self, "Export Classifications", "No classifications to export.")
+            return
+        
+        json_file, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Classifications as JSON",
+            str(self.get_classifications_json_path() or "classifications.json"),
+            "JSON files (*.json);;All files (*)"
+        )
+        
+        if json_file:
+            try:
+                # Temporarily set the path for export
+                original_path = self.npz_file_path
+                self.npz_file_path = Path(json_file).with_suffix('.npz')  # Temporary for path calculation
+                
+                # Save to the selected path
+                temp_path = Path(json_file)
+                coco_data = self.build_coco_data()
+                
+                with open(temp_path, 'w', encoding='utf-8') as f:
+                    json.dump(coco_data, f, indent=2, ensure_ascii=False)
+                
+                # Restore original path
+                self.npz_file_path = original_path
+                
+                QMessageBox.information(self, "Export Successful", 
+                                      f"Classifications exported to:\n{temp_path}")
+                print(f"Exported classifications to {temp_path}")
+                
+            except Exception as e:
+                QMessageBox.critical(self, "Export Error", f"Failed to export classifications:\n{str(e)}")
+                print(f"Error exporting classifications: {e}")
+    
+    def import_classifications_json_dialog(self):
+        """Dialog to import classifications from JSON"""
+        json_file, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import Classifications from JSON",
+            "",
+            "JSON files (*.json);;All files (*)"
+        )
+        
+        if json_file:
+            reply = QMessageBox.question(
+                self, "Import Classifications",
+                "This will replace current classifications. Continue?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            
+            if reply == QMessageBox.Yes:
+                try:
+                    success = self.load_classifications_json(Path(json_file))
+                    if success:
+                        # Mark as having unsaved changes
+                        self.has_unsaved_changes = True
+                        self.update_window_title()
+                        self.update_model_with_categories()
+                        
+                        QMessageBox.information(self, "Import Successful",
+                                              f"Classifications imported from:\n{json_file}")
+                    else:
+                        QMessageBox.warning(self, "Import Failed", 
+                                          "Failed to import classifications from JSON file.")
+                        
+                except Exception as e:
+                    QMessageBox.critical(self, "Import Error", 
+                                       f"Failed to import classifications:\n{str(e)}")
+                    print(f"Error importing classifications: {e}")
+    
+    def ensure_json_serializable(self, obj):
+        """Ensure an object is JSON serializable by converting numpy types to Python types"""
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.bool_):
+            return bool(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, (list, tuple)):
+            return [self.ensure_json_serializable(item) for item in obj]
+        elif isinstance(obj, dict):
+            return {str(k): self.ensure_json_serializable(v) for k, v in obj.items()}
+        elif hasattr(obj, '__fspath__'):  # Path-like objects
+            return str(obj)
+        else:
+            return obj
 
-    # Placeholder methods for missing functionality
+    def build_coco_data(self):
+        """Build COCO-style data structure"""
+        coco_data = {
+            "info": {
+                "description": "SymSorter Image Classifications",
+                "version": "1.0",
+                "year": int(datetime.now().year),  # Ensure int, not numpy int
+                "contributor": "SymSorter",
+                "date_created": str(datetime.now().isoformat())  # Ensure string
+            },
+            "licenses": [
+                {
+                    "id": 1,
+                    "name": "Unknown",
+                    "url": ""
+                }
+            ],
+            "categories": [],
+            "images": [],
+            "annotations": []
+        }
+        
+        # Add categories (classes)
+        for i, class_name in enumerate(self.classes):
+            # Ensure all values are JSON-serializable
+            category = {
+                "id": int(i),
+                "name": str(class_name),
+                "supercategory": "object",
+                "description": str(self.class_descriptions.get(i, "")),
+                "keystroke": str(self.class_keystrokes.get(i, ""))
+            }
+            # Apply JSON serialization safety
+            category = self.ensure_json_serializable(category)
+            coco_data["categories"].append(category)
+        
+        # Add images and annotations
+        image_id = 0
+        annotation_id = 0
+        
+        # Process all images that have embeddings
+        for filename in self.embeddings.keys():
+            image_path = Path(self.folder) / filename
+            
+            # Skip if image file doesn't exist
+            if not image_path.exists():
+                continue
+                
+            # Get image dimensions from cached data if available, otherwise open image
+            width, height = 0, 0
+            
+            # First try to get from cached dimensions (much faster)
+            if hasattr(self, 'cached_dimensions') and filename in self.cached_dimensions:
+                dims = self.cached_dimensions[filename]
+                width, height = int(dims[0]), int(dims[1])
+            
+            # If not cached or dimensions are invalid, open the image
+            if width == 0 or height == 0:
+                try:
+                    from PIL import Image
+                    with Image.open(image_path) as img:
+                        width, height = img.size
+                except Exception as e:
+                    print(f"Warning: Could not get dimensions for {filename}: {e}")
+                    width, height = 0, 0
+            
+            # Add image info - ensure all values are JSON serializable
+            image_info = {
+                "id": image_id,
+                "file_name": str(filename),  # Ensure string, not Path
+                "width": int(width),
+                "height": int(height),
+                "license": 1,
+                "date_captured": "",
+                "hidden": bool(self.hidden_flags.get(filename, False))
+            }
+            # Apply JSON serialization safety
+            image_info = self.ensure_json_serializable(image_info)
+            coco_data["images"].append(image_info)
+            
+            # Add annotation if image is classified
+            if filename in self.image_categories:
+                category_info = self.image_categories[filename]
+                annotation = {
+                    "id": int(annotation_id),
+                    "image_id": int(image_id),
+                    "category_id": int(category_info['class_id']),
+                    "category_name": str(category_info['class_name']),
+                    "bbox": [0, 0, int(width), int(height)],  # Full image bbox
+                    "area": int(width * height),
+                    "iscrowd": 0,
+                    "segmentation": []
+                }
+                # Apply JSON serialization safety
+                annotation = self.ensure_json_serializable(annotation)
+                coco_data["annotations"].append(annotation)
+                annotation_id += 1
+            
+            image_id += 1
+        
+        # Final safety check - ensure entire structure is JSON serializable
+        coco_data = self.ensure_json_serializable(coco_data)
+        return coco_data
+
     def apply_filter_to_existing_model(self, visible_files_set):
         """Efficiently apply filter by hiding/showing existing model items"""
-        # Simplified implementation - rebuild for now
+        # For simplicity and reliability, just do a rebuild
+        # The performance gain from selective hiding/showing is not worth the complexity
+        # of maintaining proper order and state
+        print("DEBUG: Applying filter - rebuilding model")
         self.rebuild_model_after_filter()
     
     def rebuild_model_after_filter(self):
         """Rebuild model after applying filter (used for major changes)"""
-        # Stop background loading
+        print(f"DEBUG: Rebuilding model with {len(self.image_files)} images")
+        
+        # Store existing icons to avoid reloading them
+        existing_icons = {}
+        for row in range(self.model.rowCount()):
+            item = self.model.item(row)
+            if item:
+                filename = item.data(Qt.UserRole)
+                if filename:
+                    icon = item.icon()
+                    # Only store non-placeholder icons - use a faster check
+                    if not icon.isNull() and icon.pixmap(self.icon_size, self.icon_size).width() > 0:
+                        # Check if it's not just a placeholder by looking at the pixmap
+                        pixmap = icon.pixmap(self.icon_size, self.icon_size)
+                        if pixmap.width() == self.icon_size and pixmap.height() == self.icon_size:
+                            # This is likely a real icon, not a placeholder
+                            existing_icons[filename] = icon
+        
+        # Stop background loading but don't clear workers unnecessarily
         self.stop_background_loading()
         
-        # Clear everything
+        # Clear model but preserve loaded icons
         self.model.clear()
         self.loaded_images.clear()
         
-        # Stop any active workers
-        for worker in self.active_workers:
-            worker.stop()
-        self.active_workers.clear()
-        self.thread_pool.clear()
-        
-        # Create placeholder items for filtered images
-        for file in self.image_files:
+        # Create items for filtered images, reusing icons where possible
+        for i, file in enumerate(self.image_files):
             item = QStandardItem()
-            item.setIcon(self.placeholder_icon)
+            
+            # Reuse existing icon if available, otherwise use placeholder
+            if file in existing_icons:
+                item.setIcon(existing_icons[file])
+                self.loaded_images.add(i)  # Mark as loaded since we have a real icon
+            else:
+                item.setIcon(self.placeholder_icon)
+                # Don't mark as loaded - it still needs to be loaded
+            
             item.setEditable(False)
             item.setData(file, Qt.UserRole)
             
@@ -1624,13 +2003,20 @@ class ImageBrowser(QMainWindow):
             
             self.model.appendRow(item)
         
-        # Update model with category information
-        self.update_model_with_categories()
+        print(f"DEBUG: Model rebuilt with {self.model.rowCount()} items, {len(existing_icons)} icons reused")
         
-        # Load first batch immediately
+        # Ensure grid and icon sizes are set correctly
+        if self.model.rowCount() > 0:
+            padding = max(10, self.icon_size // 20)
+            grid_size = self.icon_size + padding
+            self.view.setGridSize(QSize(grid_size, grid_size))
+            self.view.setIconSize(QSize(self.icon_size, self.icon_size))
+            spacing = max(2, self.icon_size // 50)
+            self.view.setSpacing(spacing)
+        
+        # Load visible images (this will be fast since many are already loaded)
         if self.image_files:
-            self.load_image_batch(0, min(40, len(self.image_files)))
-            QTimer.singleShot(100, self.load_visible_images)
+            QTimer.singleShot(50, self.load_visible_images)
 
     def resizeEvent(self, event):
         """Handle main window resize events"""
@@ -1704,7 +2090,7 @@ class ImageBrowser(QMainWindow):
             
             if reply == QMessageBox.Save:
                 # Save the work
-                self.save_hidden_flags()
+                self.save_classifications()
                 # If save was successful (no exception), continue with closing
             elif reply == QMessageBox.Cancel:
                 # Cancel the close operation

@@ -32,17 +32,23 @@ def load_clip_model(device='cuda'):
 def load_existing_embeddings(npz_path):
     """Helper function to load existing embeddings from npz file"""
     existing_embeddings = {}
+    existing_dimensions = {}
     if npz_path.exists():
         try:
             data = np.load(npz_path, allow_pickle=True)
             if 'embeddings' in data and 'filenames' in data:
                 existing_embeddings = dict(zip(data['filenames'], data['embeddings']))
+                
+                # Load dimensions if available (for backward compatibility)
+                if 'dimensions' in data:
+                    existing_dimensions = dict(zip(data['filenames'], data['dimensions']))
+                
                 print(f"Loaded {len(existing_embeddings)} existing embeddings from {npz_path}")
         except Exception as e:
             print(f"Error loading existing embeddings: {e}")
-    return existing_embeddings
+    return existing_embeddings, existing_dimensions
 
-def save_folder_embeddings(npz_path, embeddings_dict):
+def save_folder_embeddings(npz_path, embeddings_dict, dimensions_dict=None):
     """Helper function to save embeddings dictionary to npz file"""
     if not embeddings_dict:
         print(f"No embeddings to save for {npz_path}")
@@ -51,13 +57,22 @@ def save_folder_embeddings(npz_path, embeddings_dict):
     filenames = list(embeddings_dict.keys())
     embeddings = np.array(list(embeddings_dict.values()))
     
+    # Prepare dimensions array if provided
+    save_data = {
+        'embeddings': embeddings,
+        'filenames': filenames
+    }
+    
+    if dimensions_dict:
+        # Create dimensions array in same order as filenames
+        dimensions = [dimensions_dict.get(filename, (0, 0)) for filename in filenames]
+        save_data['dimensions'] = np.array(dimensions)
+    
     npz_path.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(
-        npz_path,
-        embeddings=embeddings,
-        filenames=filenames
-    )
-    print(f"Saved {len(embeddings)} embeddings to {npz_path}")
+    np.savez_compressed(npz_path, **save_data)
+    
+    dims_info = f" with dimensions" if dimensions_dict else ""
+    print(f"Saved {len(embeddings)} embeddings{dims_info} to {npz_path}")
 
 def load_dinov3_model(model_name='dinov2-base', device='cuda'):
     """Load DINOv3 model and preprocessing function."""
@@ -85,7 +100,7 @@ def task_encode_folders():
     """Doit task generator for encoding image folders."""
     
     def image_to_pickle_name(image_path, crop_size, model_type='clip'):
-        return image_path.parent.parent.parent / f'{image_path.parent.parent.parent.name}_{image_path.parent.name}_{model_type}_{crop_size:03d}.npz'
+        return image_path.parent / f'encoding_{model_type}_{crop_size:03d}.npz'
 
     def encode_folder_action(dependencies, targets):
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -106,6 +121,7 @@ def task_encode_folders():
 
         def load_and_crop(image):
             data = Image.open(image).convert("RGB")
+            original_size = data.size  # Capture original dimensions
             if crop_size > 0:
                 w, h = data.size
                 side = min(w, h, crop_size)
@@ -116,22 +132,28 @@ def task_encode_folders():
                 data = data.crop((left, top, right, bottom))
                 if side != crop_size:
                     data = data.resize((crop_size, crop_size))
-            return data
+            return data, original_size
         
         def encode_batch_clip(image_paths):
             """Encode batch using CLIP."""
-            raw_images = [load_and_crop(p) for p in image_paths]
+            batch_data = [load_and_crop(p) for p in image_paths]
+            raw_images = [data[0] for data in batch_data]
+            dimensions = [data[1] for data in batch_data]
+            
             images = [preprocess_fn(img) for img in raw_images]
             batch = torch.stack(images).to(device)
 
             with torch.no_grad():
                 feats = model.encode_image(batch)
                 feats /= feats.norm(dim=-1, keepdim=True)
-            return feats.cpu().numpy()
+            return feats.cpu().numpy(), dimensions
 
         def encode_batch_dinov3(image_paths):
             """Encode batch using DINOv3 (transformers)."""
-            raw_images = [load_and_crop(p) for p in image_paths]
+            batch_data = [load_and_crop(p) for p in image_paths]
+            raw_images = [data[0] for data in batch_data]
+            dimensions = [data[1] for data in batch_data]
+            
             inputs = preprocess_fn(images=raw_images, return_tensors="pt")
             inputs = {k: v.to(device) for k, v in inputs.items()}
 
@@ -140,18 +162,21 @@ def task_encode_folders():
                 # Use CLS token representation
                 feats = outputs.last_hidden_state[:, 0]  # Shape: [batch_size, hidden_size]
                 feats = feats / feats.norm(dim=-1, keepdim=True)
-            return feats.cpu().numpy()
+            return feats.cpu().numpy(), dimensions
 
         def encode_batch_dinov3_timm(image_paths):
             """Encode batch using DINOv3 (timm)."""
-            raw_images = [load_and_crop(p) for p in image_paths]
+            batch_data = [load_and_crop(p) for p in image_paths]
+            raw_images = [data[0] for data in batch_data]
+            dimensions = [data[1] for data in batch_data]
+            
             images = [preprocess_fn(img) for img in raw_images]
             batch = torch.stack(images).to(device)
 
             with torch.no_grad():
                 feats = model(batch)  # Already returns features
                 feats = feats / feats.norm(dim=-1, keepdim=True)
-            return feats.cpu().numpy()
+            return feats.cpu().numpy(), dimensions
 
         # Choose encoding function based on model type
         if model_type == 'clip':
@@ -168,20 +193,23 @@ def task_encode_folders():
         
         # Process all images in large batches with progress bar
         all_embeddings = []
+        all_dimensions = []
         batch_size = cfg.get('encode_batch_size')
         num_batches = (len(dependencies) + batch_size - 1) // batch_size
         for batch in tqdm(chunked(dependencies, batch_size), total=num_batches, desc=f"Encoding batches ({model_type})"):
-            batch_embeddings = encode_batch(batch)
+            batch_embeddings, batch_dimensions = encode_batch(batch)
             all_embeddings.extend(batch_embeddings)
+            all_dimensions.extend(batch_dimensions)
         
         # Now organize by folder and save to npz files
         current_folder = None
         current_npz_path = None
         existing_embeddings = {}
+        existing_dimensions = {}
         folder_embeddings = []
         folder_filenames = []
 
-        for image_path, embedding in tqdm(zip(dependencies, all_embeddings), total=len(dependencies), desc="Saving embeddings"):
+        for image_path, embedding, dimensions in tqdm(zip(dependencies, all_embeddings, all_dimensions), total=len(dependencies), desc="Saving embeddings"):
             image_path = Path(image_path)
             npz_path = image_to_pickle_name(image_path, crop_size, model_type)
             relative_name = image_path.relative_to(npz_path.parent)
@@ -189,17 +217,18 @@ def task_encode_folders():
             if npz_path != current_npz_path:
                 if current_npz_path is not None:
                     # Save previous folder's data
-                    save_folder_embeddings(current_npz_path, existing_embeddings)
+                    save_folder_embeddings(current_npz_path, existing_embeddings, existing_dimensions)
 
                 # Load existing embeddings for new folder
                 current_npz_path = npz_path
-                existing_embeddings = load_existing_embeddings(current_npz_path)
+                existing_embeddings, existing_dimensions = load_existing_embeddings(current_npz_path)
             
-            # Add current image's embedding if it's not already in existing
+            # Add current image's embedding and dimensions if not already in existing
             existing_embeddings[relative_name] = embedding
+            existing_dimensions[relative_name] = dimensions
         # Save the last folder
         if current_npz_path is not None:
-            save_folder_embeddings(current_npz_path, existing_embeddings)
+            save_folder_embeddings(current_npz_path, existing_embeddings, existing_dimensions)
     crop_size = cfg.get('encode_crop_size', 0)
     model_type = cfg.get('encode_model_type', 'clip')
     input_dir = cfg.get_url('encode_input_dir')
@@ -533,6 +562,48 @@ def inspect(
     except Exception as e:
         typer.echo(f"Error reading {npz_file}: {e}")
         raise typer.Exit(1)
+
+def load_image_dimensions(npz_path):
+    """Load image dimensions from NPZ file"""
+    if not npz_path.exists():
+        return {}
+    
+    try:
+        data = np.load(npz_path, allow_pickle=True)
+        if 'dimensions' in data and 'filenames' in data:
+            dimensions_dict = dict(zip(data['filenames'], data['dimensions']))
+            return dimensions_dict
+        else:
+            # For backward compatibility with old NPZ files without dimensions
+            return {}
+    except Exception as e:
+        print(f"Error loading dimensions from {npz_path}: {e}")
+        return {}
+
+def get_image_dimensions_cached(image_path, crop_size=0, model_type='clip'):
+    """Get image dimensions from cached NPZ file if available, otherwise open image"""
+    from pathlib import Path
+    
+    def image_to_pickle_name(image_path, crop_size, model_type='clip'):
+        return image_path.parent / f'encoding_{model_type}_{crop_size:03d}.npz'
+    
+    image_path = Path(image_path)
+    npz_path = image_to_pickle_name(image_path, crop_size, model_type)
+    relative_name = image_path.relative_to(npz_path.parent)
+    
+    # Try to load from cache first
+    dimensions_dict = load_image_dimensions(npz_path)
+    if str(relative_name) in dimensions_dict:
+        return tuple(dimensions_dict[str(relative_name)])
+    
+    # Fallback to opening the image (backward compatibility)
+    try:
+        from PIL import Image
+        with Image.open(image_path) as img:
+            return img.size
+    except Exception as e:
+        print(f"Error getting dimensions for {image_path}: {e}")
+        return (0, 0)
 
 if __name__ == "__main__":
     app()
