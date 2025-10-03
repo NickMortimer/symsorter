@@ -736,3 +736,6 @@ def concatenate(
     else:
         typer.echo("❌ Concatenation failed")
         raise typer.Exit(1)
+
+if __name__ == "__main__":
+    app()
