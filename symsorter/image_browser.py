@@ -241,6 +241,12 @@ class ImageBrowser(QMainWindow):
         self.active_workers = []  # Keep references to active workers
         self.background_load_timer = QTimer()  # Timer for background loading
         self.background_load_timer.timeout.connect(self.load_next_batch_background)
+        
+        # Set up auto-save backup timer (every 4 minutes)
+        self.auto_backup_timer = QTimer()
+        self.auto_backup_timer.timeout.connect(self.auto_backup_classifications)
+        self.auto_backup_interval = 4 * 60 * 1000  # 4 minutes in milliseconds
+        
         print(f"Image loading thread pool initialized with {max_threads} threads")
         
         # Connect scroll event for lazy loading and double-click for sorting
@@ -896,7 +902,7 @@ class ImageBrowser(QMainWindow):
             no_classes_action = QAction('No classes loaded', self)
             no_classes_action.setEnabled(False)
             self.classes_menu.addAction(no_classes_action)
-            self.classes_menu.setEnabled(False)
+            self.classes_menu.setEnabled(False)  # Disable the menu
             return
         
         # Enable the menu
@@ -1050,6 +1056,8 @@ class ImageBrowser(QMainWindow):
         if assigned_count > 0:
             self.has_unsaved_changes = True
             self.update_window_title()
+            # Start auto-backup timer if not already running
+            self.start_auto_backup()
         
         print(f"Assigned {assigned_count} images to class {class_idx}: '{class_name}'")
         
@@ -1149,7 +1157,7 @@ class ImageBrowser(QMainWindow):
         self.npz_file_path = npz_path
         
         print(f"Loading embeddings from {npz_path}")
-        self.embeddings, self.cached_dimensions = load_existing_embeddings(npz_path)
+        self.embeddings, self.cached_dimensions, self.embedding_metadata = load_existing_embeddings(npz_path)
         
         # Load hidden flags and categories from JSON file only
         self.hidden_flags = {}
@@ -1159,11 +1167,16 @@ class ImageBrowser(QMainWindow):
         json_loaded = self.load_classifications_json()
         
         if not json_loaded:
+            # Check for backup file and offer to restore
+            self.check_and_offer_backup_restore()
             print("No classifications JSON file found - starting with empty classifications")
         
         # Clear unsaved changes flag when loading new data
         self.has_unsaved_changes = False
         self.update_window_title()
+        
+        # Start auto-backup timer now that we have data loaded
+        self.start_auto_backup()
         
         if not self.embeddings:
             print("No embeddings loaded!")
@@ -1186,7 +1199,7 @@ class ImageBrowser(QMainWindow):
                            if (folder_path / filename).exists() 
                            and not self.hidden_flags.get(filename, False)
                            and filename not in self.image_categories]
-        self.original_order = self.image_files.copy()
+        self.original_order = self.image_files.copy();
         
         print(f"Found {len(self.image_files)} images with embeddings")
         
@@ -1551,7 +1564,7 @@ class ImageBrowser(QMainWindow):
                            if (folder_path / filename).exists() 
                            and not self.hidden_flags.get(filename, False)
                            and filename not in self.image_categories]
-        self.original_order = self.image_files.copy()
+        self.original_order = self.image_files.copy();
         
         # Clear and rebuild the model
         self.model.clear()  
@@ -1601,14 +1614,19 @@ class ImageBrowser(QMainWindow):
             self.has_unsaved_changes = False
             self.update_window_title()
             
+            # Cleanup backup file after successful save
+            self.cleanup_backup_on_successful_save()
+            
         except Exception as e:
             print(f"Error saving data: {e}")
     
     def get_classifications_json_path(self):
-        """Get the path for the classifications JSON file"""
+        """Get the path for the classifications JSON file - shared across crop sizes"""
         if not self.npz_file_path:
             return None
-        return self.npz_file_path.with_suffix('.json')
+        # Use folder-level classifications that work across all crop sizes
+        folder_path = self.npz_file_path.parent
+        return folder_path / "classifications.json"
     
     def save_classifications_json(self):
         """Save classifications in COCO-style JSON format"""
@@ -1795,8 +1813,8 @@ class ImageBrowser(QMainWindow):
             reply = QMessageBox.question(
                 self, "Import Classifications",
                 "This will replace current classifications. Continue?",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No
+                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+                QMessageBox.Yes  # Default to Yes
             )
             
             if reply == QMessageBox.Yes:
@@ -1839,14 +1857,16 @@ class ImageBrowser(QMainWindow):
             return obj
 
     def build_coco_data(self):
-        """Build COCO-style data structure"""
+        """Build COCO-style data structure with SymSorter extensions"""
         coco_data = {
             "info": {
                 "description": "SymSorter Image Classifications",
-                "version": "1.0",
-                "year": int(datetime.now().year),  # Ensure int, not numpy int
+                "version": "2.0",  # Updated version for new features
+                "year": int(datetime.now().year),
                 "contributor": "SymSorter",
-                "date_created": str(datetime.now().isoformat())  # Ensure string
+                "date_created": str(datetime.now().isoformat()),
+                "symsorter_version": "1.0",  # Track SymSorter version
+                "embedding_metadata": self.embedding_metadata if hasattr(self, 'embedding_metadata') else {}
             },
             "licenses": [
                 {
@@ -2074,6 +2094,9 @@ class ImageBrowser(QMainWindow):
     
     def closeEvent(self, event):
         """Clean up when closing the application"""
+        # Stop auto-backup timer
+        self.stop_auto_backup()
+        
         # Check for unsaved changes
         if self.has_unsaved_changes:
             reply = QMessageBox.question(
@@ -2091,7 +2114,7 @@ class ImageBrowser(QMainWindow):
             if reply == QMessageBox.Save:
                 # Save the work
                 self.save_classifications()
-                # If save was successful (no exception), continue with closing
+                # If save was successful (no exception), backup will be cleaned up automatically
             elif reply == QMessageBox.Cancel:
                 # Cancel the close operation
                 event.ignore()
@@ -2114,28 +2137,142 @@ class ImageBrowser(QMainWindow):
         
         event.accept()
 
-
-def main():
-    """Main function with command line argument parsing"""
-    import argparse
-    parser = argparse.ArgumentParser(description='SymSorter - Image Browser with CLIP embeddings and YOLO class assignment')
-    parser.add_argument('--classes', '-c', type=str, help='Path to YOLO classes file (.txt or .names)')
-    parser.add_argument('--embeddings', '-e', type=str, help='Path to embeddings NPZ file')
+    def get_backup_path(self):
+        """Get the path for the backup file"""
+        if not self.npz_file_path:
+            return None
+        folder_path = self.npz_file_path.parent
+        return folder_path / "classifications_backup.pickle"
     
-    args = parser.parse_args()
+    def start_auto_backup(self):
+        """Start the auto-backup timer"""
+        if self.npz_file_path and not self.auto_backup_timer.isActive():
+            self.auto_backup_timer.start(self.auto_backup_interval)
+            print("Auto-backup started - will backup every 4 minutes")
     
-    from PySide6.QtWidgets import QApplication
-    app = QApplication(sys.argv)
-    window = ImageBrowser(class_file=args.classes)
+    def stop_auto_backup(self):
+        """Stop the auto-backup timer"""
+        if self.auto_backup_timer.isActive():
+            self.auto_backup_timer.stop()
+            print("Auto-backup stopped")
     
-    # Auto-load embeddings if provided
-    if args.embeddings:
-        window.npz_file_path = Path(args.embeddings)
-        window.folder = str(window.npz_file_path.parent)
-        QTimer.singleShot(100, lambda: window.load_folder_from_path(args.embeddings))
+    def auto_backup_classifications(self):
+        """Automatically backup classifications using pickle"""
+        if not self.npz_file_path or not self.has_unsaved_changes:
+            return  # No need to backup if no changes
+            
+        backup_path = self.get_backup_path()
+        if not backup_path:
+            return
+            
+        try:
+            import pickle
+            from datetime import datetime
+            
+            # Create backup data structure
+            backup_data = {
+                'timestamp': datetime.now().isoformat(),
+                'image_categories': self.image_categories,
+                'hidden_flags': self.hidden_flags,
+                'classes': self.classes,
+                'class_keystrokes': self.class_keystrokes,
+                'class_descriptions': self.class_descriptions,
+                'npz_file_path': str(self.npz_file_path),
+                'version': '1.0'
+            }
+            
+            # Save backup using pickle
+            with open(backup_path, 'wb') as f:
+                pickle.dump(backup_data, f)
+            
+            print(f"Auto-backup saved: {len(self.image_categories)} classifications")
+            
+        except Exception as e:
+            print(f"Auto-backup failed: {e}")
     
-    window.show()
-    sys.exit(app.exec())
-
-if __name__ == "__main__":
-    main()
+    def check_and_offer_backup_restore(self):
+        """Check for backup file on startup and offer to restore"""
+        backup_path = self.get_backup_path()
+        if not backup_path or not backup_path.exists():
+            return
+            
+        try:
+            import pickle
+            from datetime import datetime
+            from PySide6.QtWidgets import QMessageBox
+            
+            # Load backup to check timestamp
+            with open(backup_path, 'rb') as f:
+                backup_data = pickle.load(f)
+            
+            timestamp_str = backup_data.get('timestamp', 'Unknown time')
+            try:
+                backup_time = datetime.fromisoformat(timestamp_str)
+                time_str = backup_time.strftime("%Y-%m-%d %H:%M:%S")
+            except:
+                time_str = timestamp_str
+            
+            classification_count = len(backup_data.get('image_categories', {}))
+            
+            # Ask user if they want to restore
+            reply = QMessageBox.question(
+                self,
+                'Backup Found',
+                f'A backup file was found from {time_str}\n'
+                f'containing {classification_count} image classifications.\n\n'
+                f'Would you like to restore this backup?\n\n'
+                f'Choose "Yes" to restore the backup,\n'
+                f'"No" to start fresh, or "Cancel" to keep the backup for later.',
+                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+                QMessageBox.Yes  # Default to Yes
+            )
+            
+            if reply == QMessageBox.Yes:
+                self.restore_from_backup(backup_data)
+                print(f"Restored backup from {time_str}")
+            elif reply == QMessageBox.No:
+                # User wants to start fresh, remove the backup
+                backup_path.unlink()
+                print("Backup removed - starting fresh")
+            # If Cancel, keep the backup file for later
+                
+        except Exception as e:
+            print(f"Error checking backup: {e}")
+    
+    def restore_from_backup(self, backup_data):
+        """Restore classifications from backup data"""
+        try:
+            # Restore the data
+            self.image_categories = backup_data.get('image_categories', {})
+            self.hidden_flags = backup_data.get('hidden_flags', {})
+            
+            # Restore classes if not already loaded
+            if not self.classes and 'classes' in backup_data:
+                self.classes = backup_data.get('classes', [])
+                self.class_keystrokes = backup_data.get('class_keystrokes', {})
+                self.class_descriptions = backup_data.get('class_descriptions', {})
+                
+                print(f"Restored {len(self.classes)} classes from backup")
+                self.update_class_info_label()
+                self.update_classes_menu()
+            
+            # Mark as having unsaved changes since we restored from backup
+            self.has_unsaved_changes = True
+            self.update_window_title()
+            
+            category_count = len(self.image_categories)
+            hidden_count = sum(1 for hidden in self.hidden_flags.values() if hidden)
+            print(f"Restored from backup: {category_count} classifications, {hidden_count} hidden images")
+            
+        except Exception as e:
+            print(f"Error restoring backup: {e}")
+    
+    def cleanup_backup_on_successful_save(self):
+        """Remove backup file after successful save"""
+        backup_path = self.get_backup_path()
+        if backup_path and backup_path.exists():
+            try:
+                backup_path.unlink()
+                print("Backup file cleaned up after successful save")
+            except Exception as e:
+                print(f"Warning: Could not remove backup file: {e}")
