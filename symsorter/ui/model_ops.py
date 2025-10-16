@@ -122,6 +122,7 @@ class ModelOpsMixin:
         if not self.embeddings:
             return
         folder_path = Path(self.folder)
+
         if filter_text == "All Images":
             visible = [fn for fn in self.embeddings.keys()
                        if (folder_path / fn).exists()
@@ -132,11 +133,14 @@ class ModelOpsMixin:
                        and not self.hidden_flags.get(fn, False)
                        and fn not in self.image_categories]
         else:
+            # Map class name -> persistent id
+            name_to_id = {name: int(self.class_ids.get(i, i)) for i, name in enumerate(self.classes)}
+            sel_id = name_to_id.get(filter_text)
             visible = [fn for fn in self.embeddings.keys()
                        if (folder_path / fn).exists()
                        and not self.hidden_flags.get(fn, False)
                        and fn in self.image_categories
-                       and self.image_categories[fn]['class_name'] == filter_text]
+                       and (self.image_categories[fn].get('class_id') == sel_id)]
         self.image_files = visible
         self.rebuild_model_after_filter()
 
