@@ -4,6 +4,7 @@ Command-line interface for SymSorter
 import typer
 from pathlib import Path
 import sys
+import json
 
 app = typer.Typer(
     name="symsorter",
@@ -17,6 +18,36 @@ from .clip_encode import doit_encode as encode, inspect
 # Register the commands with the main app
 app.command(name="encode")(encode)
 app.command(name="inspect")(inspect)
+
+# New: merge per-folder classifications.json into one COCO JSON
+@app.command(name="merge-coco")
+def merge_coco(
+    root: Path = typer.Argument(..., help="Root directory to scan for classifications.json"),
+    out: Path = typer.Option(Path("merged_classifications.json"), "--out", "-o", help="Output COCO JSON path"),
+    exclude_hidden: bool = typer.Option(False, "--exclude-hidden", help="Exclude images marked hidden=True"),
+):
+    """
+    Merge all classifications.json under ROOT into a single COCO JSON.
+    """
+    try:
+        from .io.aggregate import find_classification_manifests, merge_coco_manifests
+        from .io.classifications import ensure_json_serializable
+    except Exception as e:
+        typer.echo(f"❌ Missing dependencies or modules: {e}", err=True)
+        raise typer.Exit(1)
+
+    manifests = find_classification_manifests(root)
+    if not manifests:
+        typer.echo(f"❌ No classifications.json found under {root}", err=True)
+        raise typer.Exit(1)
+
+    typer.echo(f"Found {len(manifests)} manifests")
+    merged = merge_coco_manifests(root, manifests, include_hidden=not exclude_hidden)
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with out.open("w", encoding="utf-8") as f:
+        json.dump(ensure_json_serializable(merged), f, indent=2, ensure_ascii=False)
+    typer.echo(f"✅ Wrote merged COCO to {out}")
 
 @app.command()
 def gui(
