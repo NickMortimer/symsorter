@@ -1,10 +1,10 @@
-from PySide6.QtWidgets import (
+from PySide6.QtWidgets import (  # add QProgressDialog
     QApplication, QWidget, QListView, QVBoxLayout, QHBoxLayout,
     QPushButton, QFileDialog, QAbstractItemView, QSlider, QLabel, QComboBox,
-    QToolBar, QMenuBar, QMainWindow, QMessageBox
+    QToolBar, QMenuBar, QMainWindow, QMessageBox, QProgressDialog
 )
 from PySide6.QtGui import QPixmap, QIcon, QStandardItemModel, QStandardItem, QKeySequence, QShortcut, QAction
-from PySide6.QtCore import Qt, QSize, QThread, Signal, QTimer, QThreadPool, QRunnable, QObject, QItemSelectionModel
+from PySide6.QtCore import Qt, QSize, QThread, Signal, QTimer, QThreadPool, QRunnable, QObject, QItemSelectionModel, QProcess
 import sys
 import os
 import math
@@ -13,6 +13,8 @@ import traceback
 import argparse
 import yaml
 import json
+import re
+import shutil
 from datetime import datetime
 from pathlib import Path
 from .clip_encode import load_existing_embeddings
@@ -161,18 +163,22 @@ class ImageBrowser(QMainWindow,
         self.class_filter_combo.addItem("Unallocated")
         self.class_filter_combo.currentTextChanged.connect(self.on_class_filter_changed)
         filter_layout.addWidget(self.class_filter_combo)
-        filter_layout.addStretch()  # Push everything to the left
+        filter_layout.addStretch()
         layout.addLayout(filter_layout)
 
         # Set initial filter only on first app start
         self.class_filter_combo.blockSignals(True)
         self.class_filter_combo.setCurrentText("Unallocated")
         self.class_filter_combo.blockSignals(False)
-        
+
         # Class info label
         self.class_info_label = QLabel("No classes loaded")
         layout.addWidget(self.class_info_label)
-        
+
+        # Now it's safe to load the class file (UI attrs exist)
+        if self.class_file_path:
+            self.load_class_file(self.class_file_path)
+
         # Set initial window title
         self.update_window_title()
     
@@ -257,19 +263,38 @@ class ImageBrowser(QMainWindow,
         self.update_classes_menu()
     
 
-    def load_folder_from_path(self, npz_file):
-        """Load folder from NPZ file path (used by both dialog and command line)"""
-        npz_path = Path(npz_file)
+    def load_folder_from_path(self, path_str):
+        """Open either a folder or an NPZ file. If a folder has no NPZ, encode it first with progress."""
+        p = Path(path_str)
+        if p.is_dir():
+            npz = self._choose_npz_in_folder(p)
+            if not npz:
+                # No NPZ found; ask to encode
+                reply = QMessageBox.question(
+                    self,
+                    "Encode embeddings?",
+                    f"No embeddings (.npz) found in:\n{p}\n\nEncode this folder now?",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes
+                )
+                if reply != QMessageBox.Yes:
+                    return
+                return self._encode_folder_and_then_load(p)
+            # Found NPZ, continue as usual
+            npz_path = npz
+        else:
+            npz_path = p
+
         if not npz_path.exists():
             print(f"NPZ file not found: {npz_path}")
             return
-            
+
         self.folder = str(npz_path.parent)
         self.npz_file_path = npz_path
-        
+
         print(f"Loading embeddings from {npz_path}")
         self.embeddings, self.cached_dimensions, self.embedding_metadata = load_existing_embeddings(npz_path)
-        
+
         # Load hidden flags and categories from JSON file only
         self.hidden_flags = {}
         self.image_categories = {}
@@ -406,5 +431,112 @@ class ImageBrowser(QMainWindow,
             getattr(self, 'cached_dimensions', {}),
             getattr(self, 'class_ids', {}),
         )
+    
+    def _choose_npz_in_folder(self, folder: Path) -> Path | None:
+        """Pick the best NPZ in folder:
+        1) Prefer *(_|-)224.npz
+        2) Else largest trailing number *(_|-)<num>.npz
+        3) Else common names
+        4) Else most recent .npz
+        """
+        npzs = sorted(folder.glob("*.npz"))
+        if not npzs:
+            return None
+
+        # Collect files with a trailing numeric suffix before .npz
+        pat = re.compile(r'[_\-](\d+)\.npz$', re.IGNORECASE)
+        numbered = []
+        for p in npzs:
+            m = pat.search(p.name)
+            if m:
+                numbered.append((int(m.group(1)), p))
+
+        # 1) Prefer 224
+        preferred_224 = [p for (n, p) in numbered if n == 224]
+        if preferred_224:
+            return max(preferred_224, key=lambda x: x.stat().st_mtime)
+
+        # 2) Else largest numeric suffix
+        if numbered:
+            max_n = max(n for n, _ in numbered)
+            best = [p for (n, p) in numbered if n == max_n]
+            return max(best, key=lambda x: x.stat().st_mtime)
+
+        # 3) Fallback common names
+        for name in ("embeddings.npz", "symsorter_embeddings.npz"):
+            cand = folder / name
+            if cand.exists():
+                return cand
+
+        # 4) Most recent .npz
+        return max(npzs, key=lambda p: p.stat().st_mtime)
+
+    def _encode_folder_and_then_load(self, folder: Path):
+        """Run `symsorter encode <folder>` (or fall back to `python -m`) with a progress dialog."""
+        dlg = QProgressDialog("Encoding embeddings...", "Cancel", 0, 0, self)
+        dlg.setWindowTitle("Encoding")
+        dlg.setWindowModality(Qt.ApplicationModal)
+        dlg.setMinimumDuration(0)
+        dlg.setAutoClose(True)
+        dlg.setAutoReset(True)
+        dlg.show()
+
+        proc = QProcess(self)
+        self._encode_process = proc
+        self._encode_progress = dlg
+
+        proc.setProcessChannelMode(QProcess.MergedChannels)
+        proc.readyReadStandardOutput.connect(lambda: self._on_encode_stdout(proc, dlg))
+
+        def on_finished(exitCode, exitStatus):
+            dlg.close()
+            dlg.deleteLater()
+            self._encode_process = None
+            self._encode_progress = None
+            if exitCode == 0:
+                npz = self._choose_npz_in_folder(folder)
+                if npz and npz.exists():
+                    self.load_folder_from_path(str(npz))
+                else:
+                    QMessageBox.warning(self, "Encode finished", "Encoding finished, but no NPZ was found.")
+            else:
+                QMessageBox.critical(self, "Encode failed", f"Encoding failed with exit code {exitCode}.")
+
+        proc.finished.connect(on_finished)
+
+        def on_cancel():
+            if proc.state() != QProcess.NotRunning:
+                proc.terminate()
+                QTimer.singleShot(2000, lambda: proc.kill() if proc.state() != QProcess.NotRunning else None)
+
+        dlg.canceled.connect(on_cancel)
+
+        # Prefer the console script `symsorter`, fallback to `python -m symsorter.cli`
+        program = shutil.which("symsorter")
+        if program:
+            args = ["encode", str(folder)]
+            proc.start(program, args)
+        else:
+            python = sys.executable
+            args = ["-m", "symsorter.cli", "encode", str(folder)]
+            proc.start(python, args)
+
+        if not proc.waitForStarted(3000):
+            dlg.reset()
+            self._encode_process = None
+            self._encode_progress = None
+            QMessageBox.critical(self, "Encode failed", "Could not start encoder process.")
+
+    def _on_encode_stdout(self, proc: QProcess, dlg: QProgressDialog):
+        try:
+            data = proc.readAllStandardOutput().data().decode("utf-8", errors="replace")
+        except Exception:
+            return
+        if not data:
+            return
+        # Show last non-empty line as status
+        lines = [ln.strip() for ln in data.splitlines() if ln.strip()]
+        if lines:
+            dlg.setLabelText(f"Encoding… {lines[-1]}")
 
 

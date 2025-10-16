@@ -1,4 +1,4 @@
-from PySide6.QtWidgets import QToolBar
+from PySide6.QtWidgets import QToolBar, QFileDialog
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtCore import Qt
 
@@ -55,6 +55,14 @@ def build_menus(window):
     export_action.setStatusTip('Export classifications as YOLO annotations')
     export_action.triggered.connect(window.export_yolo_annotations)
     file_menu.addAction(export_action)
+
+    # Open folder action
+    open_folder_act = QAction("Open &Folder…", window)
+    open_folder_act.triggered.connect(lambda: (
+        setattr(window, '_d', QFileDialog.getExistingDirectory(window, "Select Image Folder") or None),
+        window.load_folder_from_path(window._d) if window._d else None
+    ))
+    file_menu.addAction(open_folder_act)
 
     # View menu
     view_menu = menubar.addMenu('&View')
@@ -155,4 +163,3 @@ def build_menus(window):
     toolbar.addAction(show_classified_action)
 
 
-    
