@@ -1,85 +1,192 @@
 from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtCore import Qt, QTimer
+from pathlib import Path
+import json
+import os
+
+FILLER_ROLE = Qt.UserRole + 42
 
 
 class ClassUIMixin:
     def update_class_info_label(self):
-        cache_text = f"Cache: {len(self.image_cache)} thumbnails, {len(self.raw_image_cache)} raw images"
-        size_text = f"Thumbnail size: {self.current_size_name} (Ctrl+/-)"
-        crop_text = f"Crop: {self.current_crop_name} (Shift+Ctrl+/-)"
-
-        if self.classes:
-            class_text = f"Classes loaded: {len(self.classes)} (Shift+F1-F{min(len(self.classes), 12)}, Enter=repeat last)"
-            if len(self.classes) > 12:
-                class_text += f" [showing first 12 of {len(self.classes)}]"
-            self.class_info_label.setText(f"{class_text}\n{size_text} | {crop_text} | {cache_text}")
-            self.update_class_filter_combo()
-            self.update_classes_menu()
+        label = getattr(self, "class_info_label", None)
+        if not label:
+            return
+        size_name = getattr(self, "current_size_name", "Medium")
+        crop_name = getattr(self, "current_crop_name", "none")
+        cache_len = len(getattr(self, "image_cache", {})) if hasattr(self, "image_cache") else 0
+        raw_len = len(getattr(self, "raw_image_cache", {})) if hasattr(self, "raw_image_cache") else 0
+        if getattr(self, "classes", []):
+            label.setText(
+                f"Classes loaded: {len(self.classes)}\n"
+                f"Thumbnail size: {size_name} (Ctrl+/-) | "
+                f"Crop: {crop_name} (Shift+Ctrl+/-) | "
+                f"Cache: {cache_len} thumbs, {raw_len} raw"
+            )
         else:
-            self.class_info_label.setText(f"No classes loaded\n{size_text} | {crop_text} | {cache_text}")
-
-    def update_class_filter_combo(self):
-        current_text = self.class_filter_combo.currentText()
-        self.class_filter_combo.blockSignals(True)
-        self.class_filter_combo.clear()
-        self.class_filter_combo.addItem("All Images")
-        self.class_filter_combo.addItem("Unallocated")
-        for class_name in self.classes:
-            self.class_filter_combo.addItem(class_name)
-        index = self.class_filter_combo.findText(current_text)
-        if index >= 0:
-            self.class_filter_combo.setCurrentIndex(index)
-        self.class_filter_combo.blockSignals(False)
+            label.setText(
+                f"No classes loaded\n"
+                f"Thumbnail size: {size_name} (Ctrl+/-) | "
+                f"Crop: {crop_name} (Shift+Ctrl+/-) | "
+                f"Cache: {cache_len} thumbs, {raw_len} raw"
+            )
 
     def update_classes_menu(self):
-        self.classes_menu.clear()
-        if not self.classes:
-            a = QAction('No classes loaded', self)
-            a.setEnabled(False)
-            self.classes_menu.addAction(a)
-            self.classes_menu.setEnabled(False)
+        menu = getattr(self, "classes_menu", None)
+        if not menu:
+            return
+        # remove old class actions
+        for act in list(menu.actions()):
+            if getattr(act, "_is_class_action", False):
+                menu.removeAction(act)
+
+        if not getattr(self, "classes", None):
             return
 
-        self.classes_menu.setEnabled(True)
-        for i, class_name in enumerate(self.classes):
-            description = self.class_descriptions.get(i, "")
-            description_suffix = f" - {description}" if description else ""
-            if i in self.class_keystrokes:
-                keystroke = self.class_keystrokes[i]
-                action = QAction(f"&{class_name}", self)
-                action.setShortcut(QKeySequence(keystroke))
-                action.setStatusTip(f'Assign selected images to class "{class_name}" ({keystroke}){description_suffix}')
-                action.triggered.connect(self.create_class_assignment_handler(i))
-                self.classes_menu.addAction(action)
-            elif i < 12:
-                f_key = f"Shift+F{i+1}"
-                action = QAction(f"&{class_name}", self)
-                action.setShortcut(QKeySequence(f_key))
-                action.setStatusTip(f'Assign selected images to class "{class_name}" ({f_key}){description_suffix}')
-                action.triggered.connect(self.create_class_assignment_handler(i))
-                self.classes_menu.addAction(action)
-            else:
-                action = QAction(f"{class_name}", self)
-                action.setStatusTip(f'Assign selected images to class "{class_name}" (no shortcut){description_suffix}')
-                action.triggered.connect(self.create_class_assignment_handler(i))
-                self.classes_menu.addAction(action)
+        items = []
+        for idx, name in enumerate(self.classes):
+            ks = getattr(self, "class_keystrokes", {}).get(idx, "")
+            items.append((idx, name, ks))
 
-        self.classes_menu.addSeparator()
-        enter_action = QAction('Assign to &Last Used Class', self)
-        enter_action.setShortcut(QKeySequence('Return'))
-        enter_action.setStatusTip('Assign selected images to last used class (Enter)')
-        enter_action.triggered.connect(self.assign_to_last_used_class)
-        self.classes_menu.addAction(enter_action)
+        def sort_key(entry):
+            _, _, ks = entry
+            if not ks:
+                return (2, "")
+            if ks.isdigit():
+                return (0, int(ks))
+            return (1, ks.lower())
 
-        classes_without_shortcuts = []
-        for i, class_name in enumerate(self.classes):
-            if i not in self.class_keystrokes and i >= 12:
-                classes_without_shortcuts.append((i + 1, class_name))
-        if classes_without_shortcuts:
-            nums = [str(n) for n, _ in classes_without_shortcuts]
-            display_range = f"{nums[0]}-{nums[-1]}" if len(nums) > 3 else ", ".join(nums)
-            info_action = QAction(f'Classes {display_range} have no shortcuts', self)
-            info_action.setEnabled(False)
-            self.classes_menu.addAction(info_action)
+        items.sort(key=sort_key)
 
-    def on_class_filter_changed(self, filter_text):
-        self.apply_class_filter(filter_text)
+        if menu.actions():
+            sep = menu.addSeparator()
+            sep._is_class_action = True
+
+        for idx, name, ks in items:
+            text = f"&{ks}: {name}" if ks else name
+            action = QAction(text, self)
+            action._is_class_action = True
+            if ks:
+                action.setShortcut(QKeySequence(ks))
+            action.triggered.connect(lambda _=False, i=idx: self.assign_class_to_selected(i))
+            menu.addAction(action)
+
+    def schedule_filter_combo_refresh(self):
+        QTimer.singleShot(0, self.update_class_filter_combo)
+
+    def force_update_class_filter_combo(self):
+        self.update_class_filter_combo()
+
+    def update_class_filter_combo(self):
+        combo = getattr(self, "class_filter_combo", None)
+        if not combo:
+            return
+
+        combo.blockSignals(True)
+        current = combo.currentText()
+        combo.clear()
+        combo.addItem("All Images")
+        combo.addItem("Unallocated")
+
+        json_cats = []
+        folder = getattr(self, "folder", "")
+        if folder:
+            jpath = Path(folder) / "classifications.json"
+            if jpath.exists():
+                try:
+                    with open(jpath, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    json_cats = [c["name"] for c in data.get("categories", []) if "name" in c]
+                except Exception:
+                    pass
+
+        file_classes = getattr(self, "classes", []) or []
+
+        merged = []
+        for n in json_cats:
+            if n not in merged:
+                merged.append(n)
+        for n in file_classes:
+            if n not in merged:
+                merged.append(n)
+
+        for name in sorted(merged):
+            combo.addItem(name)
+
+        idx = combo.findText(current)
+        if idx >= 0:
+            combo.setCurrentIndex(idx)
+        else:
+            combo.setCurrentText("All Images")
+
+        combo.blockSignals(False)
+
+    def apply_class_filter(self, filter_text):
+        if not getattr(self, "embeddings", None):
+            return
+
+        folder_path = Path(getattr(self, "folder", ""))
+        hidden = getattr(self, "hidden_flags", {})
+        cats = getattr(self, "image_categories", {})
+
+        if filter_text == "All Images":
+            visible = [fn for fn in self.embeddings.keys()
+                       if (folder_path / fn).exists() and not hidden.get(fn, False)]
+        elif filter_text == "Unallocated":
+            visible = [fn for fn in self.embeddings.keys()
+                       if (folder_path / fn).exists() and not hidden.get(fn, False) and fn not in cats]
+        else:
+            visible = [fn for fn in self.embeddings.keys()
+                       if (folder_path / fn).exists() and not hidden.get(fn, False)
+                       and fn in cats and cats[fn].get("class_name") == filter_text]
+
+        self.image_files = visible
+        self.original_order = list(self.image_files)
+        if hasattr(self, "rebuild_model_after_filter"):
+            self.rebuild_model_after_filter()
+
+    def update_item_with_classification(self, item, filename):
+        if item.data(FILLER_ROLE):
+            item.setText("")
+            item.setToolTip("")
+            return
+
+        display_name = os.path.basename(filename)
+        cats = getattr(self, "image_categories", {})
+        show_labels = getattr(self, "show_classification_labels", False)
+
+        if filename in cats:
+            info = cats[filename]
+            cname = info.get("class_name", "Unknown")
+            cid = info.get("class_id", "N/A")
+            item.setToolTip(f"File: {display_name}\nClass: {cname} (ID: {cid})")
+            item.setText(cname if show_labels else "")
+        else:
+            item.setToolTip(f"File: {display_name}\nClass: Unallocated")
+            item.setText("Unallocated" if show_labels else "")
+
+    def show_classified_images(self):
+        """Show only images that have a classification, grouped by class."""
+        if not getattr(self, "embeddings", None):
+            return
+        folder_path = Path(getattr(self, "folder", "")) if getattr(self, "folder", "") else None
+        hidden = getattr(self, "hidden_flags", {})
+        cats = getattr(self, "image_categories", {})
+
+        def exists(fn: str) -> bool:
+            return True if not folder_path else (folder_path / fn).exists()
+
+        visible = [
+            fn for fn in self.embeddings.keys()
+            if exists(fn) and not hidden.get(fn, False) and fn in cats
+        ]
+
+        self.image_files = visible
+        self.original_order = list(self.image_files)
+
+        # Prefer grouped view
+        if hasattr(self, "sort_by_class"):
+            self.sort_by_class()
+        elif hasattr(self, "rebuild_model_after_filter"):
+            self.current_sort_mode = None
+            self.rebuild_model_after_filter()

@@ -1,23 +1,22 @@
 from PySide6.QtWidgets import QToolBar, QFileDialog
-from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtGui import QAction, QActionGroup, QKeySequence
 from PySide6.QtCore import Qt
 
 
 def build_menus(window):
-    """Build menus and toolbar for the given window (delegated from ImageBrowser)."""
     menubar = window.menuBar()
 
-    # File menu
+    # File
     file_menu = menubar.addMenu('&File')
 
-    # Load embeddings action
+    # Load embeddings (NPZ) dialog
     load_action = QAction('&Load Embeddings...', window)
     load_action.setShortcut(QKeySequence('Ctrl+O'))
     load_action.setStatusTip('Load embeddings from NPZ file')
     load_action.triggered.connect(window.load_folder)
     file_menu.addAction(load_action)
 
-    # Load class file action
+    # Load class file
     load_classes_action = QAction('Load &Class File...', window)
     load_classes_action.setShortcut(QKeySequence('Ctrl+Shift+O'))
     load_classes_action.setStatusTip('Load YOLO class names file')
@@ -26,7 +25,7 @@ def build_menus(window):
 
     file_menu.addSeparator()
 
-    # Save action
+    # Save classifications
     save_action = QAction('&Save Classifications', window)
     save_action.setShortcut(QKeySequence('Ctrl+S'))
     save_action.setStatusTip('Save classifications and hidden flags')
@@ -35,46 +34,71 @@ def build_menus(window):
 
     file_menu.addSeparator()
 
-    # Export JSON action
+    # Export/Import JSON
     export_json_action = QAction('Export &Classifications (JSON)...', window)
     export_json_action.setShortcut(QKeySequence('Ctrl+J'))
     export_json_action.setStatusTip('Export classifications as COCO-style JSON')
     export_json_action.triggered.connect(window.export_classifications_json_dialog)
     file_menu.addAction(export_json_action)
 
-    # Import JSON action
     import_json_action = QAction('&Import Classifications (JSON)...', window)
     import_json_action.setShortcut(QKeySequence('Ctrl+Shift+J'))
     import_json_action.setStatusTip('Import classifications from COCO-style JSON')
     import_json_action.triggered.connect(window.import_classifications_json_dialog)
     file_menu.addAction(import_json_action)
 
-    # Export YOLO action
+    # Export YOLO
     export_action = QAction('Export &YOLO Annotations...', window)
     export_action.setShortcut(QKeySequence('Ctrl+E'))
     export_action.setStatusTip('Export classifications as YOLO annotations')
     export_action.triggered.connect(window.export_yolo_annotations)
     file_menu.addAction(export_action)
 
-    # Open folder action
-    open_folder_act = QAction("Open &Folder…", window)
+    # Open folder (images root) dialog
+    open_folder_act = QAction('Open &Folder…', window)
+    open_folder_act.setStatusTip('Open a folder of images to encode/load')
     open_folder_act.triggered.connect(lambda: (
-        setattr(window, '_d', QFileDialog.getExistingDirectory(window, "Select Image Folder") or None),
+        setattr(window, '_d', QFileDialog.getExistingDirectory(window, 'Select Image Folder') or None),
         window.load_folder_from_path(window._d) if window._d else None
     ))
     file_menu.addAction(open_folder_act)
 
-    # View menu
+    # Classes
+    classes_menu = menubar.addMenu('&Classes')
+    window.classes_menu = classes_menu
+    classes_menu.addAction(load_classes_action)  # reuse action
+    if hasattr(window, 'update_classes_menu'):
+        window.update_classes_menu()
+
+    # View
     view_menu = menubar.addMenu('&View')
 
-    # Reset order action
     reset_action = QAction('&Reset Order', window)
     reset_action.setShortcut(QKeySequence('R'))
     reset_action.setStatusTip('Reset images to original order')
     reset_action.triggered.connect(window.reset_order)
     view_menu.addAction(reset_action)
 
-    # Show classified action
+    view_menu.addSeparator()
+
+    # Labels toggle
+    show_labels_action = QAction('Show Classification &Labels', window)
+    show_labels_action.setShortcut(QKeySequence('L'))
+    show_labels_action.setCheckable(True)
+    show_labels_action.setChecked(getattr(window, 'show_classification_labels', False))
+    show_labels_action.setStatusTip('Toggle classification labels below thumbnails')
+    show_labels_action.triggered.connect(window.toggle_classification_labels)
+    view_menu.addAction(show_labels_action)
+    window.show_labels_action = show_labels_action
+
+    # Sort by class
+    sort_by_class_action = QAction('Sort by &Class', window)
+    sort_by_class_action.setShortcut(QKeySequence('Shift+C'))
+    sort_by_class_action.setStatusTip('Sort images by classification')
+    sort_by_class_action.triggered.connect(window.sort_by_class)
+    view_menu.addAction(sort_by_class_action)
+
+    # Show only classified images
     show_classified_action = QAction('Show &Classified Images', window)
     show_classified_action.setShortcut(QKeySequence('Ctrl+Shift+C'))
     show_classified_action.setStatusTip('Show all classified images')
@@ -113,46 +137,47 @@ def build_menus(window):
 
     view_menu.addSeparator()
 
-    # Thumbnail size submenu
+    # Thumbnail Size submenu
     size_menu = view_menu.addMenu('&Thumbnail Size')
+    window.size_action_group = QActionGroup(window)
+    window.size_action_group.setExclusive(True)
     window.size_actions = []
-    for size_name in window.icon_sizes.keys():
-        action = QAction(f'&{size_name}', window)
-        action.setCheckable(True)
-        action.setStatusTip(f'Set thumbnail size to {size_name} ({window.icon_sizes[size_name]}px)')
-        action.triggered.connect(window.create_size_handler(size_name))
+    for size_name, px in window.icon_sizes.items():
+        act = QAction(f'&{size_name}', window)
+        act.setCheckable(True)
+        act.setData(size_name)
+        act.setStatusTip(f'Set thumbnail size to {px}px')
+        act.triggered.connect(window.create_size_handler(size_name))
         if size_name == window.current_size_name:
-            action.setChecked(True)
-        size_menu.addAction(action)
-        window.size_actions.append(action)
+            act.setChecked(True)
+        window.size_action_group.addAction(act)
+        size_menu.addAction(act)
+        window.size_actions.append(act)
 
     # Crop submenu
     crop_menu = view_menu.addMenu('&Crop')
+    window.crop_action_group = QActionGroup(window)
+    window.crop_action_group.setExclusive(True)
     window.crop_actions = []
     for crop_name in window.crop_sizes.keys():
-        action = QAction(f'&{crop_name}', window)
-        action.setCheckable(True)
-        if crop_name == "none":
-            action.setStatusTip('No cropping - show full image')
+        act = QAction(f'&{crop_name}', window)
+        act.setCheckable(True)
+        act.setData(crop_name)
+        if crop_name == 'none':
+            act.setStatusTip('No cropping - show full image')
         else:
-            action.setStatusTip(f'Crop to {crop_name}x{crop_name} pixels from center')
-        action.triggered.connect(window.create_crop_handler(crop_name))
+            act.setStatusTip(f'Crop to {crop_name}x{crop_name} pixels from center')
+        act.triggered.connect(window.create_crop_handler(crop_name))
         if crop_name == window.current_crop_name:
-            action.setChecked(True)
-        crop_menu.addAction(action)
-        window.crop_actions.append(action)
+            act.setChecked(True)
+        window.crop_action_group.addAction(act)
+        crop_menu.addAction(act)
+        window.crop_actions.append(act)
 
-    # Classes menu (will be populated when classes are loaded)
-    window.classes_menu = menubar.addMenu('&Classes')
-    window.classes_menu.setEnabled(False)  # Disabled until classes are loaded
-    window.update_classes_menu()
-
-    # Create toolbar
+    # Toolbar
     toolbar = QToolBar()
     toolbar.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
     window.addToolBar(toolbar)
-
-    # Add actions to toolbar
     toolbar.addAction(load_action)
     toolbar.addAction(load_classes_action)
     toolbar.addSeparator()
@@ -161,5 +186,7 @@ def build_menus(window):
     toolbar.addSeparator()
     toolbar.addAction(reset_action)
     toolbar.addAction(show_classified_action)
+    toolbar.addAction(show_labels_action)
+    toolbar.addAction(sort_by_class_action)
 
 

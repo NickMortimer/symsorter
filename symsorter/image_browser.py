@@ -1,10 +1,13 @@
+from PySide6.QtCore import Qt, QModelIndex, QTimer, QThreadPool  # add QThreadPool
+from PySide6.QtGui import QStandardItemModel, QDesktopServices, QIcon, QPixmap, QColor
+from PySide6.QtWidgets import QMainWindow, QListView, QAbstractItemView
 from PySide6.QtWidgets import (  # add QProgressDialog
-    QApplication, QWidget, QListView, QVBoxLayout, QHBoxLayout,
+    QApplication, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QFileDialog, QAbstractItemView, QSlider, QLabel, QComboBox,
     QToolBar, QMenuBar, QMainWindow, QMessageBox, QProgressDialog
 )
-from PySide6.QtGui import QPixmap, QIcon, QStandardItemModel, QStandardItem, QKeySequence, QShortcut, QAction
-from PySide6.QtCore import Qt, QSize, QThread, Signal, QTimer, QThreadPool, QRunnable, QObject, QItemSelectionModel, QProcess
+import numpy as np
+from pathlib import Path
 import sys
 import os
 import math
@@ -16,7 +19,6 @@ import json
 import re
 import shutil
 from datetime import datetime
-from pathlib import Path
 from .clip_encode import load_existing_embeddings
 from .core.image_worker import WorkerSignals, ImageLoadWorker
 from .core.lazy_loader import LazyImageLoader
@@ -35,23 +37,20 @@ from .ui.view_controls import ViewControlsMixin
 from .ui.model_ops import ModelOpsMixin
 from .io.backup import BackupMixin
 from .ui.class_ui import ClassUIMixin
-from .core.assignment_ops import AssignmentOpsMixin
+from .core.assignment_ops import AssignmentOpsMixin  # use the original core mixin
 from .io.export_dialogs import ExportDialogsMixin
 from .core.folder_flow import FolderFlowMixin
 from .ui.lifecycle import LifecycleMixin
+from PySide6.QtCore import QTimer
+from collections.abc import Iterable
 
-
+# Single source of truth for filler role (matches mixins)
+FILLER_ROLE = Qt.UserRole + 42  # same role used in ModelOps
 
 class ImageBrowser(QMainWindow,
-                   LoaderOpsMixin,
-                   ViewControlsMixin,
-                   ModelOpsMixin,
-                   BackupMixin,
-                   ClassUIMixin,
-                   AssignmentOpsMixin,
-                   ExportDialogsMixin,
-                   FolderFlowMixin,
-                   LifecycleMixin):
+                   LoaderOpsMixin, ViewControlsMixin, ModelOpsMixin,
+                   BackupMixin, ClassUIMixin, AssignmentOpsMixin,  # keep in MRO
+                   ExportDialogsMixin, FolderFlowMixin, LifecycleMixin):
     def __init__(self, class_file=None):
         super().__init__()
         self.resize(1000, 700)
@@ -62,18 +61,51 @@ class ImageBrowser(QMainWindow,
         layout = QVBoxLayout(central_widget)
 
         # Image grid view
-        self.view = QListView()
-        self.view.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.view = QListView(self)
         self.view.setViewMode(QListView.IconMode)
         self.view.setResizeMode(QListView.Adjust)
-        self.view.setUniformItemSizes(True)
-        self.view.setSpacing(2)
+        self.view.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.view.setSelectionBehavior(QAbstractItemView.SelectItems)
+        self.view.setSelectionRectVisible(True)
+        self.view.doubleClicked.connect(self.on_double_click)
+
+        self.model = QStandardItemModel(self.view)
+        self.view.setModel(self.model)
+
+        # ADD: put the view into the central layout so it shows up
         layout.addWidget(self.view)
 
-        # Model
-        self.model = QStandardItemModel()
-        self.view.setModel(self.model)
-        
+        # Defaults needed by menus/handlers
+        self.icon_sizes = {"Small": 96, "Medium": 128, "Large": 160, "XL": 196}
+        self.current_size_name = getattr(self, "current_size_name", "Medium")
+        self.icon_size = self.icon_sizes[self.current_size_name]
+        self.update_placeholder_icon()
+        self.show_classification_labels = False
+        self.current_sort_mode = None
+
+        # Ensure all view defaults exist BEFORE menus/actions use them
+        self.ensure_view_defaults()
+        # Also set crop_size explicitly in case menus changed it before
+        self.crop_size = self.crop_sizes.get(self.current_crop_name, None)
+
+        # REMOVE the duplicate block that re-creates self.view and self.model
+        # self.view = QListView(self)
+        # ...
+        # self.model = QStandardItemModel(self.view)
+        # self.view.setModel(self.model)
+
+        # Keep placeholder icon in sync with current size
+        self.update_placeholder_icon()
+
+        # Thread pool and caches
+        self.thread_pool = QThreadPool.globalInstance()  # Initialize image loading thread pool
+        max_threads = max(4, self.thread_pool.maxThreadCount())
+        self.thread_pool.setMaxThreadCount(max_threads)
+        print(f"Image loading thread pool initialized with {max_threads} threads")
+
+        self.loaded_images = set()
+        self.original_order = []
+
         # Store folder path and image files
         self.folder = ""
         self.image_files = []
@@ -94,28 +126,24 @@ class ImageBrowser(QMainWindow,
 
         # Class manager
         self._classes = ClassManager()
-        if class_file:
-            self.load_class_file(class_file)
+        # Defer class loading until UI is initialized
+        self.class_file_path = class_file
         
         # Track unsaved changes
         self.has_unsaved_changes = False
         
         # YOLO class management
-        self.classes = []  # List of class names
-        self.class_keystrokes = {}  # Dictionary mapping class index to keystroke
-        self.class_descriptions = {}  # Dictionary mapping class index to description
-        self.image_categories = {}  # Store category assignments for each image
-        self.class_file_path = class_file
-        self.last_used_class_idx = None  # Track last used class for Enter key
+        self.classes = []
+        self.class_keystrokes = {}
+        self.class_descriptions = {}
+        self.image_categories = {}
+        self.last_used_class_idx = None
+        self.bboxes = {}
+        self.gps = {}
+        self.classification_viewer = None  # Classification viewer window
+        self.show_classification_labels = False
+        self.current_sort_mode = None  # 'class' when sorting by class
         
-        # Icon and crop settings optimized for 224x224 source images
-        self.icon_sizes = {"Small": 64, "Medium": 112, "Large": 224, "Extra Large": 320}
-        self.current_size_name = "Medium"
-        self.icon_size = self.icon_sizes[self.current_size_name]  # Current icon size
-        self.crop_sizes = {"64": 64, "112": 112, "128": 128, "224": 224, "none": None}
-        self.current_crop_name = "none"
-        self.crop_size = self.crop_sizes[self.current_crop_name]  # Current crop size (None = no crop)
-
         # Create a simple placeholder icon (will be updated with zoom)
         self.update_placeholder_icon()
         
@@ -134,18 +162,19 @@ class ImageBrowser(QMainWindow,
         self.auto_backup_interval = 4 * 60 * 1000  # 4 minutes in milliseconds
         
         print(f"Image loading thread pool initialized with {max_threads} threads")
-        
-        # Connect scroll event for lazy loading and double-click for sorting
+
+        # Connect scroll event for lazy loading
         self.view.verticalScrollBar().valueChanged.connect(self.on_scroll)
+        # REMOVE duplicate double-click connect here (it caused re-entrancy)
+        # self.view.doubleClicked.connect(self.on_double_click)
+
+        # Ensure double-click is connected once
+        try:
+            self.view.doubleClicked.disconnect(self.on_double_click)
+        except Exception:
+            pass
         self.view.doubleClicked.connect(self.on_double_click)
-        
-        # Connect resize event to load more images when window grows
-        self.view.resizeEvent = self.on_view_resize
-        
-        # Load class file if provided
-        if self.class_file_path:
-            self.load_class_file(self.class_file_path)
-        
+
         # Set up menus and toolbar
         self.setup_menus_and_toolbar()
         
@@ -168,7 +197,7 @@ class ImageBrowser(QMainWindow,
 
         # Set initial filter only on first app start
         self.class_filter_combo.blockSignals(True)
-        self.class_filter_combo.setCurrentText("Unallocated")
+        self.class_filter_combo.setCurrentText("All Images")
         self.class_filter_combo.blockSignals(False)
 
         # Class info label
@@ -179,19 +208,21 @@ class ImageBrowser(QMainWindow,
         if self.class_file_path:
             self.load_class_file(self.class_file_path)
 
+        # Ensure the combo is populated after UI idle
+        if hasattr(self, "schedule_filter_combo_refresh"):
+            QTimer.singleShot(0, self.schedule_filter_combo_refresh)
+
         # Set initial window title
         self.update_window_title()
     
     def setup_menus_and_toolbar(self):
-        """Setup menus and toolbar"""
+        from .ui.menus import build_menus
         return build_menus(self)
     
     def setup_shortcuts(self):
         """Setup keyboard shortcuts for class assignment"""        
-        # Keyboard shortcuts are now handled by QAction shortcuts in the Classes menu
-        # This avoids duplicate shortcut registration which causes "Ambiguous shortcut overload"
+        # Class shortcuts come from Classes menu actions
         self.function_key_shortcuts = []
-        print("DEBUG: Keyboard shortcuts will be created by Classes menu actions")
     
     def create_class_assignment_handler(self, class_idx):
         """Create a proper closure for class assignment"""
@@ -236,6 +267,30 @@ class ImageBrowser(QMainWindow,
 
 
 
+    def load_class_file(self, class_file_path):
+        """Load classes via ClassManager and update UI."""
+        print(f"DEBUG: Loading class file: {class_file_path}")
+        ok = self._classes.load(class_file_path)
+        if not ok:
+            print("DEBUG: Failed to load class file")
+            return
+            
+        # Sync local attributes
+        self.classes = self._classes.classes
+        self.class_keystrokes = self._classes.class_keystrokes
+        self.class_descriptions = self._classes.class_descriptions
+        self.class_ids = self._classes.class_ids
+        self.class_file_path = self._classes.class_file_path
+        
+        print(f"DEBUG: Classes loaded: {self.classes}")
+        
+        # Update UI components
+        self.update_class_info_label()
+        self.update_classes_menu()
+        # Refresh filter combo after UI idle
+        if hasattr(self, "schedule_filter_combo_refresh"):
+            self.schedule_filter_combo_refresh()
+
     def load_class_file_dialog(self):
         """Open dialog to load class file"""
         class_file, _ = QFileDialog.getOpenFileName(
@@ -247,296 +302,97 @@ class ImageBrowser(QMainWindow,
         if class_file:
             self.load_class_file(class_file)
     
-    def load_class_file(self, class_file_path):
-        """Load classes via ClassManager and update UI."""
-        ok = self._classes.load(class_file_path)
-        if not ok:
-            return
-        # Sync local attributes
-        self.classes = self._classes.classes
-        self.class_keystrokes = self._classes.class_keystrokes
-        self.class_descriptions = self._classes.class_descriptions
-        self.class_ids = self._classes.class_ids
-        self.class_file_path = self._classes.class_file_path
-        # Update UI
-        self.update_class_info_label()
-        self.update_classes_menu()
-    
+    def load_classes_dialog(self):
+        """Show dialog to load class file (alternative method name)"""
+        self.load_class_file_dialog()
 
-    def load_folder_from_path(self, path_str):
-        """Open either a folder or an NPZ file. If a folder has no NPZ, encode it first with progress."""
-        p = Path(path_str)
-        if p.is_dir():
-            npz = self._choose_npz_in_folder(p)
-            if not npz:
-                # No NPZ found; ask to encode
-                reply = QMessageBox.question(
-                    self,
-                    "Encode embeddings?",
-                    f"No embeddings (.npz) found in:\n{p}\n\nEncode this folder now?",
-                    QMessageBox.Yes | QMessageBox.No,
-                    QMessageBox.Yes
-                )
-                if reply != QMessageBox.Yes:
-                    return
-                return self._encode_folder_and_then_load(p)
-            # Found NPZ, continue as usual
-            npz_path = npz
-        else:
-            npz_path = p
+    def on_class_filter_changed(self, filter_text):
+        """Handle class filter combo box changes — updates image_files and reloads the view."""
+        self.current_sort_mode = None
+        if hasattr(self, "enable_class_group_wrapping"):
+            self.enable_class_group_wrapping(False)
+        self.apply_class_filter(filter_text)  # sets self.image_files and calls rebuild_model_after_filter
 
-        if not npz_path.exists():
-            print(f"NPZ file not found: {npz_path}")
+    def sort_by_class(self):
+        """Sort images by class without inserting blank tiles."""
+        if not self.image_files:
             return
 
-        self.folder = str(npz_path.parent)
-        self.npz_file_path = npz_path
+        def key_fn(fn):
+            if fn in self.image_categories:
+                info = self.image_categories[fn]
+                return (0, info.get('class_name', '').lower(), info.get('class_id', 999), fn)
+            return (1, 'zzz_unclassified', 999, fn)
 
-        print(f"Loading embeddings from {npz_path}")
-        self.embeddings, self.cached_dimensions, self.embedding_metadata = load_existing_embeddings(npz_path)
+        self.image_files.sort(key=key_fn)
+        self.current_sort_mode = "class"
+        # Disable/ignore grouping wrapper (no blank tiles)
+        if hasattr(self, "enable_class_group_wrapping"):
+            self.enable_class_group_wrapping(False)
+        self.rebuild_model_after_sort()
 
-        # Load hidden flags and categories from JSON file only
-        self.hidden_flags = {}
-        self.image_categories = {}
-        
-        # Load from JSON file (only format for classifications now)
-        json_loaded = self.load_classifications_json()
-        
-        if not json_loaded:
-            # Check for backup file and offer to restore
-            self.check_and_offer_backup_restore()
-            print("No classifications JSON file found - starting with empty classifications")
-        
-        # Clear unsaved changes flag when loading new data
-        self.has_unsaved_changes = False
-        self.update_window_title()
-        
-        # Start auto-backup timer now that we have data loaded
-        self.start_auto_backup()
-        
-        if not self.embeddings:
-            print("No embeddings loaded!")
+    def on_double_click(self, index: QModelIndex):
+        """Global similarity sort, then restrict to current filter for the view."""
+        if not index.isValid() or not getattr(self, "embeddings", None):
             return
-        
-        self.model.clear()
-        self.loaded_images.clear()
-        # Stop any active workers
-        for worker in self.active_workers:
-            worker.stop()
-        self.active_workers.clear()
-        self.thread_pool.clear()
-        
-        # Use the current filter selection to choose which images to list
-        selected_filter = self.class_filter_combo.currentText() or "All Images"
-        folder_path = Path(self.folder)
 
-        if selected_filter == "All Images":
-            self.image_files = [
-                fn for fn in self.embeddings.keys()
-                if (folder_path / fn).exists()
-                and not self.hidden_flags.get(fn, False)
-            ]
-        elif selected_filter == "Unallocated":
-            self.image_files = [
-                fn for fn in self.embeddings.keys()
-                if (folder_path / fn).exists()
-                and not self.hidden_flags.get(fn, False)
-                and fn not in self.image_categories
-            ]
-        else:
-            # Specific class filter
-            self.image_files = [
-                fn for fn in self.embeddings.keys()
-                if (folder_path / fn).exists()
-                and not self.hidden_flags.get(fn, False)
-                and fn in self.image_categories
-                and self.image_categories[fn]['class_name'] == selected_filter
-            ]
+        item = self.model.itemFromIndex(index)
+        if item and item.data(FILLER_ROLE):
+            return  # ignore filler tiles
 
-        self.original_order = self.image_files.copy()
-        print(f"Found {len(self.image_files)} images with embeddings (filter: {selected_filter})")
-        
-        # Create placeholder items for all images
-        for file in self.image_files:
-            item = QStandardItem()
-            item.setIcon(self.placeholder_icon)
-            item.setEditable(False)
-            item.setData(file, Qt.UserRole)  # Store filename in user data
-            
-            # Set initial tooltip
-            display_name = os.path.basename(file)
-            if file in self.image_categories:
-                category_info = self.image_categories[file]
-                tooltip = f"File: {display_name}\nClass: {category_info['class_name']} (ID: {category_info['class_id']})"
-            else:
-                tooltip = f"File: {display_name}\nClass: Unallocated"
-            item.setToolTip(tooltip)
-            
-            self.model.appendRow(item)
-        
-        print(f"Added {self.model.rowCount()} items to model")
-        
-        # Set initial grid and icon sizes with appropriate padding
-        # Use larger padding for bigger icons to prevent overlap
-        padding = max(10, self.icon_size // 20)  # Minimum 10px, or 5% of icon size
-        grid_size = self.icon_size + padding
-        self.view.setGridSize(QSize(grid_size, grid_size))
-        self.view.setIconSize(QSize(self.icon_size, self.icon_size))
-        # Set spacing that scales with icon size
-        spacing = max(2, self.icon_size // 50)  # Minimum 2px, scales with icon size
-        self.view.setSpacing(spacing)
-        
-        # Load first batch immediately
-        if self.image_files:
-            # Load first 100 images immediately (larger batch for initial load with small 224x224 images)
-            initial_batch_size = min(100, len(self.image_files))
-            print(f"Loading initial batch of {initial_batch_size} images")
-            self.load_image_batch(0, initial_batch_size)
-            
-            # Update model with category information
-            self.update_model_with_categories()
-            
-            # Also try to load visible images after a short delay
-            QTimer.singleShot(100, self.load_visible_images)
-
-
-
-    def save_classifications_json(self):
-        """Save classifications in COCO-style JSON format"""
-        if not self.npz_file_path:
+        anchor = item.data(Qt.UserRole) if item else None
+        if not anchor or anchor not in self.embeddings:
             return
-            
-        json_path = self.get_classifications_json_path()
-        coco_data = self.build_coco_data()
-        
-        # Save to JSON file
-        with open(str(json_path), 'w', encoding='utf-8') as f:
-            json.dump(coco_data, f, indent=2, ensure_ascii=False)
-        
-        print(f"Saved COCO-style classifications to {json_path}")
-        return str(json_path)
-    
 
-    def build_coco_data(self):
-        """Delegate COCO build to io.classifications with persistent class IDs."""
-        return io_build_coco(
-            self.folder,
-            self.embeddings,
-            self.hidden_flags,
-            self.classes,
-            self.class_keystrokes,
-            self.class_descriptions,
-            self.image_categories,
-            getattr(self, 'embedding_metadata', {}),
-            getattr(self, 'cached_dimensions', {}),
-            getattr(self, 'class_ids', {}),
+        # Current filtered set to display (preserve filter)
+        filtered_set = set(getattr(self, "image_files", []) or [])
+
+        # Candidate pool: all known images. Prefer a canonical list if present.
+        all_candidates = (
+            list(getattr(self, "all_image_files", []))     # if you maintain a full list
+            or list(getattr(self, "original_order", []))   # fallback to original order
+            or list(self.embeddings.keys())                # last resort: all with embeddings
         )
-    
-    def _choose_npz_in_folder(self, folder: Path) -> Path | None:
-        """Pick the best NPZ in folder:
-        1) Prefer *(_|-)224.npz
-        2) Else largest trailing number *(_|-)<num>.npz
-        3) Else common names
-        4) Else most recent .npz
-        """
-        npzs = sorted(folder.glob("*.npz"))
-        if not npzs:
-            return None
 
-        # Collect files with a trailing numeric suffix before .npz
-        pat = re.compile(r'[_\-](\d+)\.npz$', re.IGNORECASE)
-        numbered = []
-        for p in npzs:
-            m = pat.search(p.name)
-            if m:
-                numbered.append((int(m.group(1)), p))
-
-        # 1) Prefer 224
-        preferred_224 = [p for (n, p) in numbered if n == 224]
-        if preferred_224:
-            return max(preferred_224, key=lambda x: x.stat().st_mtime)
-
-        # 2) Else largest numeric suffix
-        if numbered:
-            max_n = max(n for n, _ in numbered)
-            best = [p for (n, p) in numbered if n == max_n]
-            return max(best, key=lambda x: x.stat().st_mtime)
-
-        # 3) Fallback common names
-        for name in ("embeddings.npz", "symsorter_embeddings.npz"):
-            cand = folder / name
-            if cand.exists():
-                return cand
-
-        # 4) Most recent .npz
-        return max(npzs, key=lambda p: p.stat().st_mtime)
-
-    def _encode_folder_and_then_load(self, folder: Path):
-        """Run `symsorter encode <folder>` (or fall back to `python -m`) with a progress dialog."""
-        dlg = QProgressDialog("Encoding embeddings...", "Cancel", 0, 0, self)
-        dlg.setWindowTitle("Encoding")
-        dlg.setWindowModality(Qt.ApplicationModal)
-        dlg.setMinimumDuration(0)
-        dlg.setAutoClose(True)
-        dlg.setAutoReset(True)
-        dlg.show()
-
-        proc = QProcess(self)
-        self._encode_process = proc
-        self._encode_progress = dlg
-
-        proc.setProcessChannelMode(QProcess.MergedChannels)
-        proc.readyReadStandardOutput.connect(lambda: self._on_encode_stdout(proc, dlg))
-
-        def on_finished(exitCode, exitStatus):
-            dlg.close()
-            dlg.deleteLater()
-            self._encode_process = None
-            self._encode_progress = None
-            if exitCode == 0:
-                npz = self._choose_npz_in_folder(folder)
-                if npz and npz.exists():
-                    self.load_folder_from_path(str(npz))
-                else:
-                    QMessageBox.warning(self, "Encode finished", "Encoding finished, but no NPZ was found.")
+        # Compute similarity for all candidates (push missing embeddings to end)
+        ref = self.embeddings[anchor]
+        sims = []
+        for fn in all_candidates:
+            vec = self.embeddings.get(fn)
+            if vec is None:
+                sims.append((fn, -1.0))
             else:
-                QMessageBox.critical(self, "Encode failed", f"Encoding failed with exit code {exitCode}.")
+                sims.append((fn, self.cosine_similarity(ref, vec)))
 
-        proc.finished.connect(on_finished)
+        sims.sort(key=lambda x: x[1], reverse=True)
 
-        def on_cancel():
-            if proc.state() != QProcess.NotRunning:
-                proc.terminate()
-                QTimer.singleShot(2000, lambda: proc.kill() if proc.state() != QProcess.NotRunning else None)
+        # Restrict the view to the current filter (no new images added)
+        ordered_view = [fn for fn, _ in sims if fn in filtered_set]
 
-        dlg.canceled.connect(on_cancel)
+        # If any filtered items didn’t get scored, append them preserving current order
+        if len(ordered_view) != len(filtered_set):
+            current_order = list(getattr(self, "image_files", []))
+            seen = set(ordered_view)
+            ordered_view.extend([fn for fn in current_order if fn not in seen])
 
-        # Prefer the console script `symsorter`, fallback to `python -m symsorter.cli`
-        program = shutil.which("symsorter")
-        if program:
-            args = ["encode", str(folder)]
-            proc.start(program, args)
-        else:
-            python = sys.executable
-            args = ["-m", "symsorter.cli", "encode", str(folder)]
-            proc.start(python, args)
+        # Update the view list only (filter preserved)
+        self.image_files = ordered_view
 
-        if not proc.waitForStarted(3000):
-            dlg.reset()
-            self._encode_process = None
-            self._encode_progress = None
-            QMessageBox.critical(self, "Encode failed", "Could not start encoder process.")
+        # Rebuild as plain list (no class fillers), using cache
+        self.current_sort_mode = None
+        if hasattr(self, "enable_class_group_wrapping"):
+            self.enable_class_group_wrapping(False)
 
-    def _on_encode_stdout(self, proc: QProcess, dlg: QProgressDialog):
-        try:
-            data = proc.readAllStandardOutput().data().decode("utf-8", errors="replace")
-        except Exception:
-            return
-        if not data:
-            return
-        # Show last non-empty line as status
-        lines = [ln.strip() for ln in data.splitlines() if ln.strip()]
-        if lines:
-            dlg.setLabelText(f"Encoding… {lines[-1]}")
+        # Preserve scroll and selection
+        vsb = self.view.verticalScrollBar()
+        pos = vsb.value()
+        self.rebuild_model()
+        QTimer.singleShot(0, lambda: vsb.setValue(pos))
 
-
+        def _reselect():
+            for row in range(self.model.rowCount()):
+                it = self.model.item(row)
+                if it and it.data(Qt.UserRole) == anchor:
+                    self.view.setCurrentIndex(self.model.index(row, 0))
+                    break
+        QTimer.singleShot(0, _reselect)

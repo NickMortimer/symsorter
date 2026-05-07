@@ -102,7 +102,7 @@ def similarity(
     from .clip_encode import load_existing_embeddings, load_clip_model, CLIP_AVAILABLE
     
     if not CLIP_AVAILABLE:
-        typer.echo("❌ CLIP not installed. Install with: pip install openai-clip", err=True)
+        typer.echo("❌ CLIP not installed. Install with: pip install open-clip-torch", err=True)
         raise typer.Exit(1)
     
     try:
@@ -161,6 +161,62 @@ def similarity(
     except Exception as e:
         typer.echo(f"❌ Error: {e}", err=True)
         raise typer.Exit(1)
+    
+from .commands.sort_images import sort_images_command
+from .commands.prepare_dataset import (
+    prepare_dataset_command,
+    update_json_from_symsorter_command,
+)
+
+@app.command(name="sort")
+def sort(
+    root: Path = typer.Argument(..., help="Root directory to scan for classifications.json"),
+    out: Path = typer.Argument(..., help="Output root directory"), 
+    shard_size: int = typer.Option(5000, "--shard-size", "-n", help="Max images per shard subdirectory"),
+    exclude_hidden: bool = typer.Option(False, "--exclude-hidden", help="Exclude images marked hidden=True"),
+    link: bool = typer.Option(False, "--link", help="Use symlinks instead of copying files"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Print actions without writing files"),
+):
+    """Sort and shard images by classification into an output directory."""
+    return sort_images_command(
+        root=root,
+        out=out,
+        shard_size=shard_size,
+        exclude_hidden=exclude_hidden,
+        link=link,
+        dry_run=dry_run,
+    )    
+
+
+@app.command(name="prepare")
+def prepare(
+    root: Path = typer.Argument(..., help="Root directory containing images and Labelme/X-AnyLabeling JSON files"),
+    out: Path = typer.Option(None, "--out", "-o", help="Output thumbnail directory (default: <root>/symsorter_prepared)"),
+    thumb_size: int = typer.Option(224, "--thumb-size", help="Thumbnail size in pixels"),
+    context_scale: float = typer.Option(1.6, "--context-scale", help="ROI context scale around annotation"),
+):
+    """Create ROI-centered thumbnails for sorting in SymSorter."""
+    out_dir = out or (root / "symsorter_prepared")
+    prepare_dataset_command(
+        root=root,
+        out_dir=out_dir,
+        thumb_size=thumb_size,
+        context_scale=context_scale,
+    )
+
+
+@app.command(name="update-json")
+def update_json(
+    prepared_dir: Path = typer.Argument(..., help="Directory created by prepare containing thumbnails and mapping file"),
+    source_root: Path = typer.Option(None, "--source-root", help="Original dataset root (optional; inferred from mapping if omitted)"),
+    replace_label: bool = typer.Option(False, "--replace-label", help="Replace original shape label with SymSorter class name"),
+):
+    """Write SymSorter classification results back into source JSON files."""
+    update_json_from_symsorter_command(
+        prepared_dir=prepared_dir,
+        source_root=source_root,
+        replace_label=replace_label,
+    )
 
 def main():
     """Main entry point for symsorter CLI"""

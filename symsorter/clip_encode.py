@@ -13,9 +13,9 @@ from doit.tools import check_timestamp_unchanged
 from transformers import Dinov2Model, AutoImageProcessor
 import timm
 
-# Try to import CLIP and set availability flag
+# Use OpenCLIP as the sole CLIP backend.
 try:
-    import clip
+    import open_clip
     CLIP_AVAILABLE = True
 except ImportError:
     CLIP_AVAILABLE = False
@@ -26,7 +26,15 @@ DOIT_CONFIG = {'check_file_uptodate': 'timestamp'}
 
 def load_clip_model(device='cuda'):
     """Load CLIP model and preprocessing function."""
-    model, preprocess = clip.load("ViT-B/32", device=device)
+    if not CLIP_AVAILABLE:
+        raise ImportError("OpenCLIP not installed. Install with: pip install open-clip-torch")
+
+    model, _, preprocess = open_clip.create_model_and_transforms(
+        "ViT-B-32",
+        pretrained="openai",
+        device=device,
+    )
+    model.eval()
     return model, preprocess
 
 def load_existing_embeddings(npz_path):
@@ -130,7 +138,7 @@ def task_encode_folders():
         # Load appropriate model
         print(f"📦 Loading {model_type} model...")
         if model_type == 'clip':
-            model, preprocess_fn = clip.load("ViT-B/32", device=device)
+            model, preprocess_fn = load_clip_model(device)
         elif model_type == 'dinov3':
             model, preprocess_fn = load_dinov3_model('dinov2-base', device)
         elif model_type == 'dinov3_timm':
