@@ -1,335 +1,210 @@
 # SymSorter
 
-**A CLIP-based image classification and similarity tool for intelligent image sorting**
-
-SymSorter is a powerful image classification tool that leverages OpenAI's CLIP (Contrastive Language-Image Pre-training) and other vision models to help you sort, classify, and organize large collections of images based on semantic similarity and custom categories.
+A CLIP/DINO-based image classification and dataset curation tool with a fast desktop GUI.
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.9+-blue.svg)
 
-## 🌟 Features
+## Features
 
-- **AI-Powered Image Encoding**: Uses CLIP, DINOv3, and other state-of-the-art vision models
-- **Interactive GUI**: Fast, responsive interface for browsing and classifying thousands of images
-- **Smart Similarity Sorting**: Double-click any image to sort by visual similarity
-- **Custom Classification**: Define your own classes with custom keyboard shortcuts
-- **YAML Configuration**: Flexible class definitions with descriptions and custom hotkeys
-- **Batch Processing**: Efficient handling of large image collections
-- **Caching System**: Smart caching for fast loading and smooth scrolling
-- **YOLO Export**: Export classifications in YOLO annotation format
-- **Thumbnail Scaling**: Multiple thumbnail sizes and crop options
-- **Progress Tracking**: Save and resume classification work
+- Encode image folders with CLIP, DINOv3 (Transformers), or DINOv3 (timm)
+- GUI for high-volume review with keyboard-driven class assignment
+- Similarity sorting from a selected image (double-click in GUI)
+- Class definitions from YAML, TXT, or NAMES-style files
+- Save/reload classifications as COCO-style JSON (`classifications.json`)
+- Export YOLO labels from GUI
+- Prepare ROI thumbnails from Labelme/X-AnyLabeling datasets
+- Write SymSorter class decisions back into source annotation JSON
+- Merge many `classifications.json` files into one COCO JSON
+- Sort and shard classified images into train-ready folder layouts
 
-## 🚀 Quick Start
-
-### Installation
+## Installation
 
 ```bash
-# Clone repository
 git clone https://github.com/NickMortimer/symsorter.git
 cd symsorter
 
-# Create virtual environment (recommended)
 python -m venv .venv
-source .venv/bin/activate  # Linux/Mac
-# or
-.venv\Scripts\activate     # Windows
+source .venv/bin/activate
 
-# Install package
 pip install -e .
 ```
 
-### Basic Usage
-
-1. **Encode your images** (create embeddings):
-   ```bash
-   symsorter-encode /path/to/your/images --output embeddings.npz
-   ```
-
-2. **Create class definitions** (`classes.yaml`):
-   ```yaml
-   classes:
-     - name: turtle
-       keystroke: "5"
-       description: "Sea turtle images"
-     - name: waves
-       keystroke: "2"
-       description: "Wave and water surface images"
-     - name: beach
-       keystroke: "1"
-       description: "Beach and shoreline images"
-   ```
-
-3. **Launch the GUI**:
-   ```bash
-   symsorter-gui --embeddings embeddings.npz --classes classes.yaml
-   ```
-
-4. **Start classifying**: Select images and press keyboard shortcuts to assign classes!
-
-## 📋 Detailed Installation
-
-### Prerequisites
-
-- Python 3.9 or higher
-- CUDA-compatible GPU (recommended for faster encoding)
-
-### Step-by-Step Installation
-
-1. **Clone and Setup**:
-   ```bash
-   git clone https://github.com/NickMortimer/symsorter.git
-   cd symsorter
-   
-   # Create virtual environment
-   python -m venv .venv
-   source .venv/bin/activate  # Linux/Mac
-   # or
-   .venv\Scripts\activate     # Windows
-   ```
-
-2. **Install Dependencies**:
-   ```bash
-   # Install all dependencies
-   pip install -e .
-   
-   # Or install with development tools
-   pip install -e ".[dev]"
-   ```
-
-3. **Verify Installation**:
-   ```bash
-   symsorter --help
-   symsorter-gui --help
-   symsorter-encode --help
-   ```
-
-## 📖 Usage Guide
-
-### 1. Creating Image Embeddings
-
-Before using the GUI, you need to create embeddings for your images:
+Verify:
 
 ```bash
-# Basic encoding with CLIP
-symsorter-encode /path/to/images --output my_images.npz
-
-# Use DINOv3 model instead
-symsorter-encode /path/to/images --model dinov3 --output my_images.npz
-
-# Process with custom batch size and device
-symsorter-encode /path/to/images --batch-size 32 --device cuda --output my_images.npz
+symsorter --help
+symsorter-gui
 ```
 
-**Supported Models:**
-- `clip` (default): OpenAI CLIP ViT-B/32
-- `dinov3`: Meta's DINOv3 vision transformer
-- `dinov3-timm`: DINOv3 via timm library
+## Quick Start
 
-### 2. Setting Up Classification Classes
+### Workflow A: Classify a Folder of Images
 
-Create a `classes.yaml` file to define your classification categories:
+1. Encode image folders (creates per-folder NPZ files like `encoding_clip_000.npz`):
+
+```bash
+symsorter encode /path/to/images
+```
+
+2. Create class definitions (`classes.yaml` example):
 
 ```yaml
 classes:
   - name: turtle
+    class_id: 7
     keystroke: "5"
-    description: "Sea turtle images"
+    description: "Sea turtle"
   - name: waves
+    class_id: 8
     keystroke: "2"
-    description: "Wave and water surface images"
-  - name: beach
-    keystroke: "1"
-    description: "Beach and shoreline images"
-  - name: benthic
-    keystroke: "3"
-    description: "Seafloor and benthic habitat images"
+    description: "Water surface"
 ```
 
-**Alternative text format** (`classes.txt`):
+3. Start GUI with a generated NPZ:
+
+```bash
+symsorter gui --embeddings-file /path/to/images/encoding_clip_000.npz --class-file classes.yaml
 ```
+
+4. Classify with keyboard shortcuts and save (`Ctrl+S`).
+   This writes COCO-style `classifications.json` next to the NPZ file.
+
+### Workflow B: Labelme/X-AnyLabeling Round Trip
+
+1. Prepare ROI thumbnails from annotation JSON:
+
+```bash
+symsorter prepare /path/to/source_dataset --out /path/to/source_dataset/symsorter_prepared
+```
+
+2. Encode prepared thumbnails:
+
+```bash
+symsorter encode /path/to/source_dataset/symsorter_prepared
+```
+
+3. Classify in GUI and save:
+
+```bash
+symsorter gui --embeddings-file /path/to/source_dataset/symsorter_prepared/encoding_clip_000.npz --class-file classes.yaml
+```
+
+4. Apply SymSorter classes back to original annotation JSON:
+
+```bash
+symsorter update-json /path/to/source_dataset/symsorter_prepared --replace-label
+```
+
+## CLI Reference
+
+SymSorter uses one main CLI with subcommands:
+
+```bash
+symsorter --help
+```
+
+Available commands:
+
+- `encode INPUT_DIR`
+  - Build or incrementally update per-folder embedding files.
+  - Key options: `--pattern`, `--batch-size`, `--crop-size`, `--model-type`
+  - Supported `--model-type`: `clip`, `dinov3`, `dinov3_timm`
+
+- `inspect --npz-file PATH`
+  - Show keys, embedding shape, dimensions, and metadata in an NPZ.
+
+- `gui`
+  - Launch GUI.
+  - Options: `--embeddings-file`, `--class-file`
+
+- `similarity EMBEDDINGS_FILE QUERY_IMAGE`
+  - Find nearest images to a query image embedding.
+  - Options: `--top-k`, `--output-dir`
+
+- `prepare ROOT`
+  - Create ROI thumbnails from Labelme/X-AnyLabeling JSON + image pairs.
+  - Options: `--out`, `--thumb-size`, `--context-scale`
+
+- `update-json PREPARED_DIR`
+  - Apply SymSorter classes from prepared output back to source JSON files.
+  - Options: `--source-root`, `--replace-label`
+
+- `sort ROOT OUT`
+  - Collect classified images and shard by class into an output tree.
+  - Options: `--shard-size`, `--exclude-hidden`, `--link`, `--dry-run`
+
+- `merge-coco ROOT`
+  - Merge all nested `classifications.json` files into one COCO JSON.
+  - Options: `--out`, `--exclude-hidden`
+
+## GUI Controls
+
+Common shortcuts:
+
+- `Ctrl+O`: Load embeddings NPZ
+- `Ctrl+Shift+O`: Load class file
+- `Ctrl+S`: Save classifications
+- `Ctrl+E`: Export YOLO annotations
+- `Ctrl+J`: Export classifications JSON
+- `Ctrl+Shift+J`: Import classifications JSON
+- `R`: Reset order
+- `L`: Toggle classification labels
+- `Shift+C`: Sort by class
+- `Ctrl+Shift+C`: Show classified images
+- `Ctrl+=` / `Ctrl+-`: Thumbnail size
+- `Shift+Ctrl+=` / `Shift+Ctrl+-`: Crop zoom
+- Double-click image: sort by visual similarity
+
+Class assignment shortcuts come from your class file `keystroke` values.
+
+## Class File Formats
+
+YAML:
+
+```yaml
+classes:
+  - name: turtle
+    class_id: 7
+    keystroke: "5"
+    description: "Sea turtle"
+  - name: sand
+    keystroke: "s"
+```
+
+Text formats are also supported:
+
+```text
 turtle:5
-waves:2
-beach:1
-benthic:3
+sand:s
 ```
 
-### 3. Using the GUI
+or one class per line:
 
-Launch the GUI with your embeddings and classes:
+```text
+turtle
+sand
+```
+
+## Output Files
+
+- Embeddings: `encoding_<model_type>_<crop>.npz` in each processed folder
+- Classification state: `classifications.json` (COCO-style) beside NPZ
+- Prepared dataset map: `symsorter_prepare_map.json` in prepared output folder
+- YOLO export (GUI): `labels/*.txt` and `classes.txt`
+
+## Development
 
 ```bash
-symsorter-gui --embeddings my_images.npz --classes classes.yaml
-```
-
-#### GUI Controls
-
-**Navigation:**
-- **Scroll**: Browse through images
-- **Ctrl + Mouse Wheel**: Change thumbnail size
-- **Ctrl + Plus/Minus**: Increase/decrease thumbnail size
-- **Shift + Ctrl + Plus/Minus**: Adjust crop zoom
-
-**Classification:**
-- **Number Keys** or **Custom Keys**: Assign selected images to classes
-- **Shift + F1-F12**: Default shortcuts for first 12 classes
-- **Enter**: Assign to last used class
-- **Double-click image**: Sort by similarity
-
-**File Operations:**
-- **Ctrl + O**: Load embeddings
-- **Ctrl + S**: Save classifications
-- **Ctrl + E**: Export YOLO annotations
-- **R**: Reset image order
-
-**Filtering:**
-- Use the dropdown to filter by:
-  - All Images
-  - Unallocated (unclassified)
-  - Specific class names
-
-### 4. Working with Classifications
-
-**Select Multiple Images:**
-- Click and drag to select multiple images
-- Hold Ctrl and click to add individual images to selection
-- Hold Shift and click to select ranges
-
-**Assign Classes:**
-- Select images and press the assigned key (e.g., "5" for turtle)
-- Images are automatically hidden from "Unallocated" view
-- Switch to "All Images" view to see classified images
-
-**Save Progress:**
-- Press Ctrl+S or use File → Save Classifications
-- Classifications are saved back to the NPZ file
-- Resume work by loading the same NPZ file
-
-### 5. Export Results
-
-Export your classifications for use in other tools:
-
-```bash
-# Export YOLO format annotations
-# Use File → Export YOLO Annotations in GUI
-# Creates labels/ directory with .txt files for each image
-```
-
-## ⚙️ Configuration
-
-### Environment Variables
-
-```bash
-# Set default device for encoding
-export SYMSORTER_DEVICE=cuda
-
-# Set cache directory
-export SYMSORTER_CACHE_DIR=/path/to/cache
-```
-
-### Performance Tuning
-
-**For Large Collections (10k+ images):**
-- Use a fast SSD for image storage
-- Increase batch size for encoding: `--batch-size 64`
-- Use CUDA if available: `--device cuda`
-
-**For Better GUI Performance:**
-- Use smaller thumbnail sizes for very large collections
-- Enable image caching (enabled by default)
-- Close other applications to free up memory
-
-## 🔧 Advanced Usage
-
-### Command Line Interface
-
-```bash
-# Encode with specific model and settings
-symsorter encode images/ \
-  --model dinov3 \
-  --batch-size 32 \
-  --device cuda \
-  --output marine_survey.npz
-
-# Launch GUI with specific settings
-symsorter gui \
-  --embeddings marine_survey.npz \
-  --classes marine_classes.yaml
-```
-
-### Integration with Other Tools
-
-SymSorter works well with:
-- **Computer Vision Pipelines**: Export embeddings for clustering/analysis
-- **YOLO Training**: Export annotations for object detection training
-- **Data Science Workflows**: Load embeddings as numpy arrays for analysis
-
-### Programmatic Usage
-
-```python
-from symsorter.clip_encode import load_existing_embeddings
-import numpy as np
-
-# Load embeddings
-embeddings = load_existing_embeddings('my_images.npz')
-
-# Access embedding vectors
-for filename, embedding in embeddings.items():
-    print(f"{filename}: {embedding.shape}")
-```
-
-## 🤝 Contributing
-
-We welcome contributions! Please see our contributing guidelines:
-
-1. Fork the repository
-2. Create a feature branch: `git checkout -b feature-name`
-3. Make your changes and add tests
-4. Run tests: `pytest`
-5. Submit a pull request
-
-### Development Setup
-
-```bash
-# Install development dependencies
 pip install -e ".[dev]"
-
-# Run tests
 pytest
-
-# Format code
-black symsorter/
-isort symsorter/
-
-# Type checking
-mypy symsorter/
 ```
 
-## 📝 License
+## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+MIT. See [LICENSE](LICENSE).
 
-## 🙏 Acknowledgments
+## Support
 
-- **OpenAI** for the CLIP model
-- **Meta AI** for the DINOv3 model
-- **Anthropic** for development assistance
-- **Qt/PySide6** for the GUI framework
-
-## 📞 Support
-
-- **Issues**: [GitHub Issues](https://github.com/NickMortimer/symsorter/issues)
-- **Documentation**: [Project Wiki](https://github.com/NickMortimer/symsorter/wiki)
-- **Email**: nick.mortimer@csiro.au
-
-## 🗺️ Roadmap
-
-- [ ] Additional vision model support
-- [ ] Batch classification suggestions
-- [ ] Integration with cloud storage
-- [ ] Advanced similarity metrics
-- [ ] Multi-user collaboration features
-
----
-
-**SymSorter** - Making image classification intelligent and efficient! 🖼️✨
+- Issues: https://github.com/NickMortimer/symsorter/issues
+- Email: nick.mortimer@csiro.au
