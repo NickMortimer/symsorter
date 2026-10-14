@@ -70,3 +70,7 @@ venv.bak/
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# Model weights (Ultralytics SAM, etc.)
+*.pt
+*.pth
