@@ -152,6 +152,18 @@ Available commands:
       --limit 50
     ```
 
+- `remap-npz`
+  - Rebuild per-shard NPZs under `sorted/` by joining original crop embeddings on filename (no re-encode).
+  - Options: `--thumbs`, `--source`, `--npz-name`, `--classes`, `--overwrite`, `--dry-run`, `--limit-shards`
+  - Example:
+    ```bash
+    symsorter remap-npz \
+      --thumbs /Volumes/turtle_apfs/sorted \
+      --source /Volumes/turtle_apfs/turtle_v01_run02 \
+      --npz-name encoding_dinov3_224.npz \
+      --overwrite
+    ```
+
 ## GUI Controls
 
 Common shortcuts:
