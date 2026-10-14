@@ -42,6 +42,17 @@ def _is_nested_duplicate(rel_parts: tuple[str, ...], class_names: set[str]) -> b
     return False
 
 
+def _is_appledouble_or_junk(path: Path) -> bool:
+    """True for macOS AppleDouble / Finder junk (``._foo.jpg``, ``.DS_Store``, …)."""
+    name = path.name
+    if name.startswith("._"):
+        return True
+    if name.startswith("."):
+        return True
+    # Also skip if any parent segment is AppleDouble metadata
+    return any(part.startswith("._") for part in path.parts)
+
+
 def _class_roots(thumbs: Path, class_names: tuple[str, ...]) -> list[Path]:
     """Resolve class folders from a sorted root or a single class directory."""
     thumbs = thumbs.resolve()
@@ -73,6 +84,8 @@ def iter_thumb_paths(
     for class_root in _class_roots(thumbs, class_names):
         for path in sorted(class_root.rglob("*")):
             if not path.is_file() and not path.is_symlink():
+                continue
+            if _is_appledouble_or_junk(path):
                 continue
             if path.suffix.lower() not in IMAGE_EXTENSIONS:
                 continue
@@ -133,6 +146,10 @@ def outline_draft_command(
         f"{', dry-run' if dry_run else ''})"
     )
     typer.echo("LabelMe JSON will be written beside each thumb (same directory).")
+    typer.echo(
+        "Note: progress 'skip_json' = sibling *.json already exists "
+        "(use --overwrite to replace). AppleDouble '._*' files are ignored."
+    )
 
     if dry_run:
         broken = 0
@@ -268,7 +285,7 @@ def outline_draft_command(
         )
         progress.set_postfix(
             written=stats["written"],
-            skipped=stats["skipped_existing"],
+            skip_json=stats["skipped_existing"],
             errors=stats["errors"],
             refresh=False,
         )
@@ -288,9 +305,14 @@ def outline_draft_command(
 
     typer.echo(
         f"✅ Done: written={stats['written']}, "
-        f"skipped_existing={stats['skipped_existing']}, "
+        f"skip_json(existing)={stats['skipped_existing']}, "
         f"broken_symlink={stats['broken_symlink']}, "
         f"errors={stats['errors']}"
     )
+    if stats["skipped_existing"]:
+        typer.echo(
+            "   skip_json means a LabelMe file already sits beside the thumb "
+            "(prior draft or measurement sidecar). Re-run with --overwrite to replace."
+        )
     typer.echo("   Labels: beside each thumb (*.json next to *.jpg)")
     return stats

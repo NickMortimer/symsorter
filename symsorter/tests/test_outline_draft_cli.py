@@ -42,6 +42,21 @@ def test_iter_skips_nested_duplicate_trees(tmp_path: Path) -> None:
     assert any("turtle-deep/shard_00001/" in r for r in rels)
 
 
+def test_iter_skips_appledouble_dot_underscore_files(tmp_path: Path) -> None:
+    shard = tmp_path / "turtle-surface" / "shard_00001"
+    shard.mkdir(parents=True)
+    good = "051_DJIP4_RGB_AU_GRAV_20221023T064910_0723_det_10_turtle_3_224px.jpg"
+    Image.new("RGB", (224, 224), color=(1, 2, 3)).save(shard / good)
+    # macOS AppleDouble sidecar that looks like a jpg
+    (shard / f"._{good}").write_bytes(b"fake-appledouble")
+    (shard / ".DS_Store").write_bytes(b"store")
+
+    found = list(iter_thumb_paths(tmp_path, ("turtle-surface",)))
+    names = [p.name for p, _rel in found]
+    assert names == [good]
+    assert not any(n.startswith("._") for n in names)
+
+
 def test_box_polygon_inset() -> None:
     draft = box_polygon(size=224, inset=8)
     assert draft.backend == "box"
