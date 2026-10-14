@@ -68,6 +68,22 @@ class ModelOpsMixin:
             if isinstance(pm, QPixmap):
                 # Scale keeping aspect, no crop here (consistent with cache)
                 scaled = pm.scaled(icon_size, icon_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                if getattr(self, "show_outline_overlays", False):
+                    try:
+                        from symsorter.outline.overlay import apply_outline_overlay_if_present
+                        from pathlib import Path
+
+                        folder = getattr(self, "folder", "") or ""
+                        thumb_path = Path(folder) / key_fn if folder else Path(fn)
+                        scaled = apply_outline_overlay_if_present(
+                            scaled,
+                            thumb_path,
+                            source_width=pm.width(),
+                            source_height=pm.height(),
+                            outline_only=True,
+                        )
+                    except Exception:
+                        pass
                 icon = QIcon(scaled)
                 if cache_ic:
                     try:

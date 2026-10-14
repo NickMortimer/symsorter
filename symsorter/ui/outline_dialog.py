@@ -6,8 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QPainter, QPen, QPixmap, QPolygonF, QFont
-from PySide6.QtCore import QPointF
+from PySide6.QtGui import QColor, QPixmap, QFont
 from PySide6.QtWidgets import (
     QDialog,
     QHBoxLayout,
@@ -23,6 +22,7 @@ from symsorter.outline.export_labelme import (
     labelme_path_for_thumb,
     load_labelme_json,
 )
+from symsorter.outline.overlay import draw_polygons_on_pixmap
 
 DEFAULT_DISPLAY_SIZE = 672  # 3× 224 thumbs
 
@@ -45,32 +45,15 @@ def render_thumb_with_polygons(
         Qt.KeepAspectRatio,
         Qt.SmoothTransformation,
     )
-    # Draw on a copy so we don't mutate the scaled cache unexpectedly.
-    canvas = QPixmap(scaled)
     if not polygons:
-        return canvas
-
-    painter = QPainter(canvas)
-    painter.setRenderHint(QPainter.Antialiasing, True)
-
-    sx = canvas.width() / max(1, pix.width())
-    sy = canvas.height() / max(1, pix.height())
-
-    fill = QColor(0, 220, 180, 55)
-    pen = QPen(QColor(0, 255, 200, 230))
-    pen.setWidth(2)
-    painter.setPen(pen)
-    painter.setBrush(fill)
-
-    for shape in polygons:
-        pts = shape.get("points") or []
-        if len(pts) < 3:
-            continue
-        poly = QPolygonF([QPointF(p[0] * sx, p[1] * sy) for p in pts])
-        painter.drawPolygon(poly)
-
-    painter.end()
-    return canvas
+        return scaled
+    return draw_polygons_on_pixmap(
+        scaled,
+        polygons,
+        source_width=pix.width(),
+        source_height=pix.height(),
+        outline_only=False,
+    )
 
 
 class OutlineViewerDialog(QDialog):

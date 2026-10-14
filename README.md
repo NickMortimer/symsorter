@@ -182,6 +182,7 @@ Common shortcuts:
 - `Shift+Ctrl+=` / `Shift+Ctrl+-`: Crop zoom
 - Double-click image: sort by visual similarity
 - `O`: Outline viewer — show sibling LabelMe polygons on the selected thumb(s)
+- `Shift+O`: Toggle outline overlays on grid thumbnails
 
 Class assignment shortcuts come from your class file `keystroke` values.
 

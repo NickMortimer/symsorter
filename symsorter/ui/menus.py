@@ -117,6 +117,18 @@ def build_menus(window):
     view_menu.addAction(outline_action)
     window.outline_action = outline_action
 
+    # Grid overlay of sibling LabelMe polygons
+    outline_overlay_action = QAction('Show Outline &Overlays', window)
+    outline_overlay_action.setShortcut(QKeySequence('Shift+O'))
+    outline_overlay_action.setCheckable(True)
+    outline_overlay_action.setChecked(getattr(window, 'show_outline_overlays', True))
+    outline_overlay_action.setStatusTip(
+        'Draw turtle polygons from sibling LabelMe JSON onto grid thumbnails'
+    )
+    outline_overlay_action.triggered.connect(window.toggle_outline_overlays)
+    view_menu.addAction(outline_overlay_action)
+    window.show_outline_overlays_action = outline_overlay_action
+
     view_menu.addSeparator()
 
     # Thumbnail size controls
@@ -201,5 +213,6 @@ def build_menus(window):
     toolbar.addAction(show_labels_action)
     toolbar.addAction(sort_by_class_action)
     toolbar.addAction(outline_action)
+    toolbar.addAction(outline_overlay_action)
 
 

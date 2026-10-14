@@ -142,6 +142,7 @@ class ImageBrowser(QMainWindow,
         self.gps = {}
         self.classification_viewer = None  # Classification viewer window
         self.show_classification_labels = False
+        self.show_outline_overlays = True  # draw sibling LabelMe polygons on grid thumbs
         self.current_sort_mode = None  # 'class' when sorting by class
         
         # Create a simple placeholder icon (will be updated with zoom)
@@ -238,21 +239,53 @@ class ImageBrowser(QMainWindow,
         return handler
     
 
-    # Cache wrappers (unchanged signatures)
-    def get_cache_key(self, filename, icon_size, crop_size):
-        return self._cache.get_cache_key(filename, icon_size, crop_size)
+    # Cache wrappers
+    def _outline_cache_variant(self):
+        return "outline" if getattr(self, "show_outline_overlays", False) else None
 
-    def get_cached_icon(self, filename, icon_size, crop_size):
-        return self._cache.get_cached_icon(filename, icon_size, crop_size)
+    def get_cache_key(self, filename, icon_size, crop_size, variant=None):
+        if variant is None:
+            variant = self._outline_cache_variant()
+        return self._cache.get_cache_key(filename, icon_size, crop_size, variant=variant)
 
-    def cache_icon(self, filename, icon_size, crop_size, icon):
-        return self._cache.cache_icon(filename, icon_size, crop_size, icon)
+    def get_cached_icon(self, filename, icon_size, crop_size, variant=None):
+        if variant is None:
+            variant = self._outline_cache_variant()
+        return self._cache.get_cached_icon(
+            filename, icon_size, crop_size, variant=variant
+        )
+
+    def cache_icon(self, filename, icon_size, crop_size, icon, variant=None):
+        if variant is None:
+            variant = self._outline_cache_variant()
+        return self._cache.cache_icon(
+            filename, icon_size, crop_size, icon, variant=variant
+        )
 
     def get_cached_raw_image(self, filename):
         return self._cache.get_cached_raw_image(filename)
 
     def cache_raw_image(self, filename, pixmap):
         return self._cache.cache_raw_image(filename, pixmap)
+
+    def toggle_outline_overlays(self, checked=None):
+        """Toggle polygon outlines on grid thumbnails and reload icons."""
+        if checked is None:
+            checked = not getattr(self, "show_outline_overlays", False)
+        self.show_outline_overlays = bool(checked)
+        if hasattr(self, "show_outline_overlays_action"):
+            self.show_outline_overlays_action.setChecked(self.show_outline_overlays)
+        # Drop processed icons so workers rebuild with/without overlays.
+        if hasattr(self, "_cache"):
+            self._cache.image_cache.clear()
+            self._cache.cache_access_order = [
+                k for k in self._cache.cache_access_order if not isinstance(k, tuple)
+            ]
+        if hasattr(self, "reload_images_with_new_size"):
+            self.reload_images_with_new_size()
+        tip = "on" if self.show_outline_overlays else "off"
+        if hasattr(self, "statusBar") and self.statusBar():
+            self.statusBar().showMessage(f"Outline overlays {tip}", 3000)
 
     def clear_caches(self):
         return self._cache.clear()

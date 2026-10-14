@@ -2,17 +2,17 @@ from PySide6.QtGui import QIcon, QPixmap
 
 class CacheManager:
     def __init__(self, max_cache_size=8000, max_raw_cache_size=1000):
-        self.image_cache = {}          # (filename, icon_size, crop_size) -> QIcon
+        self.image_cache = {}          # (filename, icon_size, crop_size, variant) -> QIcon
         self.raw_image_cache = {}      # filename -> QPixmap
         self.max_cache_size = max_cache_size
         self.max_raw_cache_size = max_raw_cache_size
         self.cache_access_order = []   # LRU order (mix of cache keys and filenames)
 
-    def get_cache_key(self, filename, icon_size, crop_size):
-        return (filename, icon_size, crop_size)
+    def get_cache_key(self, filename, icon_size, crop_size, variant=None):
+        return (filename, icon_size, crop_size, variant)
 
-    def get_cached_icon(self, filename, icon_size, crop_size):
-        key = self.get_cache_key(filename, icon_size, crop_size)
+    def get_cached_icon(self, filename, icon_size, crop_size, variant=None):
+        key = self.get_cache_key(filename, icon_size, crop_size, variant=variant)
         if key in self.image_cache:
             if key in self.cache_access_order:
                 self.cache_access_order.remove(key)
@@ -20,8 +20,8 @@ class CacheManager:
             return self.image_cache[key]
         return None
 
-    def cache_icon(self, filename, icon_size, crop_size, icon: QIcon):
-        key = self.get_cache_key(filename, icon_size, crop_size)
+    def cache_icon(self, filename, icon_size, crop_size, icon: QIcon, variant=None):
+        key = self.get_cache_key(filename, icon_size, crop_size, variant=variant)
         self.image_cache[key] = icon
         if key in self.cache_access_order:
             self.cache_access_order.remove(key)
