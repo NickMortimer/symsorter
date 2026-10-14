@@ -169,12 +169,6 @@ def outline_draft_command(
         parsed = parse_thumb_filename(path.name)
         # LabelMe convention: foo.jpg → foo.json in the same folder.
         label_path = path.with_suffix(".json")
-        progress.set_postfix(
-            written=stats["written"],
-            skipped=stats["skipped_existing"],
-            errors=stats["errors"],
-            refresh=False,
-        )
 
         if path.is_symlink() and not path.exists():
             stats["broken_symlink"] += 1
@@ -271,6 +265,12 @@ def outline_draft_command(
                 },
                 ensure_ascii=False,
             )
+        )
+        progress.set_postfix(
+            written=stats["written"],
+            skipped=stats["skipped_existing"],
+            errors=stats["errors"],
+            refresh=False,
         )
 
     if out is not None:
