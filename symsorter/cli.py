@@ -168,6 +168,7 @@ from .commands.prepare_dataset import (
     update_json_from_symsorter_command,
 )
 from .commands.outline_draft import outline_draft_command
+from .commands.remap_sorted_npz import remap_sorted_npz_command
 
 @app.command(name="sort")
 def sort(
@@ -279,6 +280,56 @@ def outline_draft(
         dry_run=dry_run,
         sam_model=sam_model,
         device=device,
+    )
+
+
+@app.command(name="remap-npz")
+def remap_npz(
+    thumbs: Path = typer.Option(
+        ...,
+        "--thumbs",
+        help="Sorted root (…/sorted), a class folder, or a single shard_* folder",
+    ),
+    source: Path = typer.Option(
+        ...,
+        "--source",
+        help="Root of original crop trees containing encoding_*.npz (e.g. turtle_v01_run02)",
+    ),
+    npz_name: str = typer.Option(
+        "encoding_dinov3_224.npz",
+        "--npz-name",
+        help="NPZ basename to read from source and write into each sorted shard",
+    ),
+    classes: str = typer.Option(
+        "turtle-surface,turtle-deep",
+        "--classes",
+        help="Comma-separated class folders under --thumbs",
+    ),
+    overwrite: bool = typer.Option(
+        False,
+        "--overwrite",
+        help="Replace existing NPZ files in sorted shards",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Index and report match counts; write nothing",
+    ),
+    limit_shards: int = typer.Option(
+        None,
+        "--limit-shards",
+        help="Only process the first N shards (smoke runs)",
+    ),
+):
+    """Rebuild per-shard NPZs in sorted/ by joining original crop embeddings on filename."""
+    return remap_sorted_npz_command(
+        thumbs=thumbs,
+        source=source,
+        npz_name=npz_name,
+        classes=classes,
+        overwrite=overwrite,
+        dry_run=dry_run,
+        limit_shards=limit_shards,
     )
 
 
