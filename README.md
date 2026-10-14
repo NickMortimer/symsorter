@@ -169,6 +169,7 @@ Common shortcuts:
 - `Ctrl+=` / `Ctrl+-`: Thumbnail size
 - `Shift+Ctrl+=` / `Shift+Ctrl+-`: Crop zoom
 - Double-click image: sort by visual similarity
+- `O`: Outline viewer — show sibling LabelMe polygons on the selected thumb(s)
 
 Class assignment shortcuts come from your class file `keystroke` values.
 

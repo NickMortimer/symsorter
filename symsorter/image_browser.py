@@ -223,6 +223,12 @@ class ImageBrowser(QMainWindow,
         """Setup keyboard shortcuts for class assignment"""        
         # Class shortcuts come from Classes menu actions
         self.function_key_shortcuts = []
+
+    def open_outline_viewer(self):
+        """Show sibling LabelMe polygons for the selected thumb(s)."""
+        from .ui.outline_dialog import open_outline_viewer_for_browser
+
+        open_outline_viewer_for_browser(self)
     
     def create_class_assignment_handler(self, class_idx):
         """Create a proper closure for class assignment"""

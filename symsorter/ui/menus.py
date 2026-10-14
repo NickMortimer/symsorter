@@ -107,6 +107,18 @@ def build_menus(window):
 
     view_menu.addSeparator()
 
+    # Outline polygon viewer (sibling LabelMe JSON)
+    outline_action = QAction('&Outline Viewer…', window)
+    outline_action.setShortcut(QKeySequence('O'))
+    outline_action.setStatusTip(
+        'Show LabelMe polygons on the selected thumb(s) (sibling *.json)'
+    )
+    outline_action.triggered.connect(window.open_outline_viewer)
+    view_menu.addAction(outline_action)
+    window.outline_action = outline_action
+
+    view_menu.addSeparator()
+
     # Thumbnail size controls
     increase_size_action = QAction('&Increase Thumbnail Size', window)
     increase_size_action.setShortcut(QKeySequence('Ctrl+='))
@@ -188,5 +200,6 @@ def build_menus(window):
     toolbar.addAction(show_classified_action)
     toolbar.addAction(show_labels_action)
     toolbar.addAction(sort_by_class_action)
+    toolbar.addAction(outline_action)
 
 
