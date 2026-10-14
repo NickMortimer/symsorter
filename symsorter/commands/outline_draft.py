@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import typer
+from tqdm import tqdm
 
 from symsorter.outline.backends import (
     DEFAULT_SAM_MODEL,
@@ -158,14 +159,26 @@ def outline_draft_command(
 
     manifest_lines: list[str] = []
 
-    for path, rel in candidates:
+    progress = tqdm(
+        candidates,
+        desc=f"outline-draft ({backend_name})",
+        unit="thumb",
+        total=len(candidates),
+    )
+    for path, rel in progress:
         parsed = parse_thumb_filename(path.name)
         # LabelMe convention: foo.jpg → foo.json in the same folder.
         label_path = path.with_suffix(".json")
+        progress.set_postfix(
+            written=stats["written"],
+            skipped=stats["skipped_existing"],
+            errors=stats["errors"],
+            refresh=False,
+        )
 
         if path.is_symlink() and not path.exists():
             stats["broken_symlink"] += 1
-            typer.echo(f"⚠️  Broken symlink, skipping: {path}", err=True)
+            tqdm.write(f"⚠️  Broken symlink, skipping: {path}")
             manifest_lines.append(
                 json.dumps(
                     {
@@ -194,7 +207,7 @@ def outline_draft_command(
 
         if not path.exists():
             stats["missing"] += 1
-            typer.echo(f"⚠️  Missing file, skipping: {path}", err=True)
+            tqdm.write(f"⚠️  Missing file, skipping: {path}")
             continue
 
         try:
@@ -207,7 +220,7 @@ def outline_draft_command(
             )
         except Exception as exc:  # noqa: BLE001 - report and continue batch
             stats["errors"] += 1
-            typer.echo(f"⚠️  Draft failed for {path.name}: {exc}", err=True)
+            tqdm.write(f"⚠️  Draft failed for {path.name}: {exc}")
             continue
 
         shape_flags = dict(draft.flags)
