@@ -4,16 +4,22 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 import typer
 
-from symsorter.outline.backends import DEFAULT_THUMB_SIZE, draft_polygon
+from symsorter.outline.backends import (
+    DEFAULT_SAM_MODEL,
+    DEFAULT_THUMB_SIZE,
+    draft_polygon,
+    load_sam_model,
+)
 from symsorter.outline.export_labelme import build_labelme_dict, write_labelme_json
 from symsorter.outline.filename import parse_thumb_filename
 
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png")
 DEFAULT_CLASSES = ("turtle-surface", "turtle-deep")
+SUPPORTED_BACKENDS = frozenset({"sam", "box", "threshold"})
 
 
 def _parse_classes(classes: str | None) -> tuple[str, ...]:
@@ -81,24 +87,25 @@ def iter_thumb_paths(
 
 def outline_draft_command(
     thumbs: Path,
-    out: Path,
+    out: Path | None = None,
     classes: str = "turtle-surface,turtle-deep",
-    backend: str = "box",
+    backend: str = "sam",
     limit: int | None = None,
     overwrite: bool = False,
     dry_run: bool = False,
+    sam_model: str = DEFAULT_SAM_MODEL,
+    device: str | None = None,
 ) -> dict[str, int]:
-    """Enumerate thumbs and write LabelMe drafts + ``manifest.jsonl``."""
+    """Draft polygons beside each thumb; optional ``manifest.jsonl`` via ``--out``."""
     if not thumbs.exists():
         typer.echo(f"❌ Thumbs root not found: {thumbs}", err=True)
         raise typer.Exit(1)
 
     class_names = _parse_classes(classes)
-    backend_name = (backend or "box").strip().lower()
-    if backend_name not in {"box", "threshold"}:
+    backend_name = (backend or "sam").strip().lower()
+    if backend_name not in SUPPORTED_BACKENDS:
         typer.echo(
-            f"❌ Unsupported backend {backend!r}. MVP supports box|threshold "
-            "(sam is later).",
+            f"❌ Unsupported backend {backend!r}. Use sam|box|threshold.",
             err=True,
         )
         raise typer.Exit(1)
@@ -124,6 +131,7 @@ def outline_draft_command(
         f"(classes={','.join(class_names)}, backend={backend_name}"
         f"{', dry-run' if dry_run else ''})"
     )
+    typer.echo("LabelMe JSON will be written beside each thumb (same directory).")
 
     if dry_run:
         broken = 0
@@ -139,15 +147,21 @@ def outline_draft_command(
         stats["broken_symlink"] = broken
         return stats
 
-    out = out.resolve()
-    labels_root = out / "labels"
-    manifest_path = out / "manifest.jsonl"
-    out.mkdir(parents=True, exist_ok=True)
+    sam_model_obj: Any | None = None
+    if backend_name == "sam":
+        try:
+            typer.echo(f"Loading Ultralytics SAM ({sam_model})…")
+            sam_model_obj = load_sam_model(sam_model=sam_model, device=device)
+        except ImportError as exc:
+            typer.echo(f"❌ {exc}", err=True)
+            raise typer.Exit(1) from exc
 
     manifest_lines: list[str] = []
 
     for path, rel in candidates:
         parsed = parse_thumb_filename(path.name)
+        # LabelMe convention: foo.jpg → foo.json in the same folder.
+        label_path = path.with_suffix(".json")
 
         if path.is_symlink() and not path.exists():
             stats["broken_symlink"] += 1
@@ -157,6 +171,7 @@ def outline_draft_command(
                     {
                         "thumb_path": str(path),
                         "thumb_rel": str(rel),
+                        "label_path": str(label_path),
                         "thumb_stem": parsed.thumb_stem,
                         "conf": parsed.conf,
                         "det_index": parsed.det_index,
@@ -183,7 +198,13 @@ def outline_draft_command(
             continue
 
         try:
-            draft = draft_polygon(backend_name, image_path=path)
+            draft = draft_polygon(
+                backend_name,
+                image_path=path,
+                sam_model_obj=sam_model_obj,
+                sam_model=sam_model,
+                device=device,
+            )
         except Exception as exc:  # noqa: BLE001 - report and continue batch
             stats["errors"] += 1
             typer.echo(f"⚠️  Draft failed for {path.name}: {exc}", err=True)
@@ -204,8 +225,6 @@ def outline_draft_command(
             label="turtle",
         )
 
-        label_rel = rel.with_suffix(".json")
-        label_path = labels_root / label_rel
         wrote = write_labelme_json(label_path, labelme, overwrite=overwrite)
         if not wrote:
             stats["skipped_existing"] += 1
@@ -241,11 +260,18 @@ def outline_draft_command(
             )
         )
 
-    # Overwrite or append: for MVP rewrite full manifest for this run.
-    with manifest_path.open("w", encoding="utf-8") as f:
-        for line in manifest_lines:
-            f.write(line)
-            f.write("\n")
+    if out is not None:
+        out = out.resolve()
+        out.mkdir(parents=True, exist_ok=True)
+        manifest_path = out / "manifest.jsonl"
+        with manifest_path.open("w", encoding="utf-8") as f:
+            for line in manifest_lines:
+                f.write(line)
+                f.write("\n")
+        typer.echo(f"   Manifest: {manifest_path}")
+    else:
+        # Still useful for the run summary when not writing a separate out tree.
+        typer.echo("   Manifest: (not written; pass --out DIR to save manifest.jsonl)")
 
     typer.echo(
         f"✅ Done: written={stats['written']}, "
@@ -253,6 +279,5 @@ def outline_draft_command(
         f"broken_symlink={stats['broken_symlink']}, "
         f"errors={stats['errors']}"
     )
-    typer.echo(f"   Labels: {labels_root}")
-    typer.echo(f"   Manifest: {manifest_path}")
+    typer.echo("   Labels: beside each thumb (*.json next to *.jpg)")
     return stats

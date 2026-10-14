@@ -140,14 +140,15 @@ Available commands:
   - Options: `--out`, `--exclude-hidden`
 
 - `outline-draft`
-  - Write draft LabelMe polygons on sorted 224×224 thumbs (thumb-native; no `yolo_finds`).
-  - Options: `--thumbs`, `--out`, `--classes`, `--backend` (`box`|`threshold`), `--limit`, `--overwrite`, `--dry-run`
+  - Write draft LabelMe polygons **beside each thumb** (`foo.jpg` → `foo.json`; thumb-native; no `yolo_finds`).
+  - Default backend: Ultralytics SAM (`pip install 'symsorter[sam]'`). Also `box` and `threshold`.
+  - Options: `--thumbs`, `--out` (optional `manifest.jsonl` only), `--classes`, `--backend`, `--sam-model`, `--device`, `--limit`, `--overwrite`, `--dry-run`
   - Example:
     ```bash
     symsorter outline-draft \
       --thumbs /path/to/sorted \
-      --out /path/to/outline_drafts \
-      --backend box \
+      --out /path/to/outline_manifests \
+      --backend sam \
       --limit 50
     ```
 

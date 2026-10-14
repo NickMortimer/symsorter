@@ -228,9 +228,9 @@ def outline_draft(
         help="Root of sorted shards (…/sorted or a single class folder)",
     ),
     out: Path = typer.Option(
-        ...,
+        None,
         "--out",
-        help="Output root for draft LabelMe JSON + manifest.jsonl",
+        help="Optional directory for manifest.jsonl (LabelMe JSON is written beside each thumb)",
     ),
     classes: str = typer.Option(
         "turtle-surface,turtle-deep",
@@ -238,9 +238,19 @@ def outline_draft(
         help="Comma-separated class folder names to include",
     ),
     backend: str = typer.Option(
-        "box",
+        "sam",
         "--backend",
-        help="Draft backend: box (inset rectangle) or threshold (simple silhouette)",
+        help="Draft backend: sam (Ultralytics SAM, default), box, or threshold",
+    ),
+    sam_model: str = typer.Option(
+        "sam_b.pt",
+        "--sam-model",
+        help="Ultralytics SAM weights (used when --backend sam)",
+    ),
+    device: str = typer.Option(
+        None,
+        "--device",
+        help="Torch device for SAM (e.g. cpu, mps, cuda:0); default is Ultralytics auto",
     ),
     limit: int = typer.Option(
         None,
@@ -250,7 +260,7 @@ def outline_draft(
     overwrite: bool = typer.Option(
         False,
         "--overwrite",
-        help="Replace existing draft LabelMe JSON files",
+        help="Replace existing LabelMe JSON beside thumbs (skips by default)",
     ),
     dry_run: bool = typer.Option(
         False,
@@ -258,7 +268,7 @@ def outline_draft(
         help="Enumerate only; print counts; write nothing",
     ),
 ):
-    """Generate draft turtle polygons on 224×224 sorted thumbs (no yolo_finds)."""
+    """Generate draft turtle polygons beside sorted 224×224 thumbs (no yolo_finds)."""
     return outline_draft_command(
         thumbs=thumbs,
         out=out,
@@ -267,6 +277,8 @@ def outline_draft(
         limit=limit,
         overwrite=overwrite,
         dry_run=dry_run,
+        sam_model=sam_model,
+        device=device,
     )
 
 

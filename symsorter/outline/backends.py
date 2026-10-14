@@ -1,4 +1,9 @@
-"""Draft polygon backends in 224×224 thumb space (no heavy ML deps)."""
+"""Draft polygon backends in 224×224 thumb space.
+
+``box`` / ``threshold`` need only numpy + Pillow. ``sam`` uses Ultralytics SAM
+(same pattern as turtledrone ``utils/segment.py``): prompt with an inset box on
+the thumb and take ``masks.xy`` as the draft polygon.
+"""
 
 from __future__ import annotations
 
@@ -11,6 +16,7 @@ from PIL import Image
 
 DEFAULT_THUMB_SIZE = 224
 DEFAULT_BOX_INSET = 8
+DEFAULT_SAM_MODEL = "sam_b.pt"
 
 
 @dataclass(frozen=True)
@@ -192,14 +198,143 @@ def threshold_polygon(image_path: Path, size: int = DEFAULT_THUMB_SIZE) -> Draft
     )
 
 
+def load_sam_model(sam_model: str = DEFAULT_SAM_MODEL, device: str | None = None) -> Any:
+    """Load Ultralytics SAM once for a batch. Requires ``pip install ultralytics``."""
+    try:
+        from ultralytics import SAM
+    except ImportError as exc:
+        raise ImportError(
+            "SAM backend requires ultralytics. Install with: "
+            "pip install 'symsorter[sam]'  (or: pip install ultralytics)"
+        ) from exc
+    model = SAM(sam_model)
+    # Stash preferred device for predict calls (None → ultralytics default).
+    model._symsorter_device = device
+    return model
+
+
+def _prompt_bbox_xyxy(size: int = DEFAULT_THUMB_SIZE, inset: int = DEFAULT_BOX_INSET) -> list[float]:
+    """Inset box prompt covering the thumb (tight crop → almost whole frame)."""
+    inset = max(0, min(inset, (size // 2) - 1))
+    return [float(inset), float(inset), float(size - inset), float(size - inset)]
+
+
+def _points_from_sam_result(result: Any) -> list[list[float]] | None:
+    """Extract the first mask polygon from an Ultralytics Results object."""
+    masks = getattr(result, "masks", None)
+    if masks is None:
+        return None
+    xy = getattr(masks, "xy", None)
+    if xy is None or len(xy) == 0:
+        return None
+    poly = xy[0]
+    if poly is None:
+        return None
+    # numpy array or list
+    if hasattr(poly, "tolist"):
+        points = poly.tolist()
+    else:
+        points = list(poly)
+    if not points or len(points) < 3:
+        return None
+    # Ensure [[x,y], ...] of floats
+    cleaned: list[list[float]] = []
+    for pt in points:
+        if len(pt) < 2:
+            continue
+        cleaned.append([float(pt[0]), float(pt[1])])
+    return cleaned if len(cleaned) >= 3 else None
+
+
+def sam_polygon(
+    image_path: Path,
+    model: Any | None = None,
+    *,
+    size: int = DEFAULT_THUMB_SIZE,
+    inset: int = DEFAULT_BOX_INSET,
+    sam_model: str = DEFAULT_SAM_MODEL,
+    device: str | None = None,
+) -> DraftPolygon:
+    """Ultralytics SAM draft: inset-box prompt → mask polygon in thumb space."""
+    if model is None:
+        model = load_sam_model(sam_model=sam_model, device=device)
+    device = device if device is not None else getattr(model, "_symsorter_device", None)
+    bboxes = _prompt_bbox_xyxy(size=size, inset=inset)
+
+    # Prefer BGR ndarray path used in turtledrone; fall back to file path.
+    try:
+        import cv2  # type: ignore
+
+        im = cv2.imread(str(image_path))
+        source: Any = im if im is not None else str(image_path)
+    except ImportError:
+        source = str(image_path)
+
+    predict_kwargs: dict[str, Any] = {
+        "bboxes": bboxes,
+        "verbose": False,
+        "save": False,
+    }
+    if device is not None:
+        predict_kwargs["device"] = device
+
+    results = model(source, **predict_kwargs)
+    if not results:
+        draft = box_polygon(size=size, inset=inset)
+        return DraftPolygon(
+            points=draft.points,
+            backend="sam",
+            flags={
+                "draft": True,
+                "backend": "sam",
+                "fallback": "box",
+                "reason": "empty_results",
+                "sam_model": sam_model,
+                "prompt_bbox": bboxes,
+            },
+        )
+
+    points = _points_from_sam_result(results[0])
+    if points is None:
+        draft = box_polygon(size=size, inset=inset)
+        return DraftPolygon(
+            points=draft.points,
+            backend="sam",
+            flags={
+                "draft": True,
+                "backend": "sam",
+                "fallback": "box",
+                "reason": "no_mask",
+                "sam_model": sam_model,
+                "prompt_bbox": bboxes,
+            },
+        )
+
+    return DraftPolygon(
+        points=points,
+        backend="sam",
+        flags={
+            "draft": True,
+            "backend": "sam",
+            "sam_model": sam_model,
+            "prompt_bbox": bboxes,
+            "n_points": len(points),
+        },
+    )
+
+
 def draft_polygon(
     backend: str,
     image_path: Path | None = None,
     size: int = DEFAULT_THUMB_SIZE,
     inset: int = DEFAULT_BOX_INSET,
+    *,
+    sam_model_obj: Any | None = None,
+    sam_model: str = DEFAULT_SAM_MODEL,
+    device: str | None = None,
 ) -> DraftPolygon:
-    """Dispatch to a draft backend. ``sam`` is intentionally unimplemented."""
-    name = (backend or "box").strip().lower()
+    """Dispatch to a draft backend: ``sam`` (default preference), ``box``, ``threshold``."""
+    name = (backend or "sam").strip().lower()
     if name == "box":
         return box_polygon(size=size, inset=inset)
     if name == "threshold":
@@ -207,7 +342,14 @@ def draft_polygon(
             raise ValueError("threshold backend requires image_path")
         return threshold_polygon(image_path, size=size)
     if name == "sam":
-        raise NotImplementedError(
-            "SAM backend is not part of the MVP; use --backend box or threshold"
+        if image_path is None:
+            raise ValueError("sam backend requires image_path")
+        return sam_polygon(
+            image_path,
+            model=sam_model_obj,
+            size=size,
+            inset=inset,
+            sam_model=sam_model,
+            device=device,
         )
-    raise ValueError(f"Unknown outline backend: {backend!r} (expected box|threshold)")
+    raise ValueError(f"Unknown outline backend: {backend!r} (expected sam|box|threshold)")
