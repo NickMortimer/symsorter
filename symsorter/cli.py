@@ -167,6 +167,7 @@ from .commands.prepare_dataset import (
     prepare_dataset_command,
     update_json_from_symsorter_command,
 )
+from .commands.outline_draft import outline_draft_command
 
 @app.command(name="sort")
 def sort(
@@ -217,6 +218,57 @@ def update_json(
         source_root=source_root,
         replace_label=replace_label,
     )
+
+
+@app.command(name="outline-draft")
+def outline_draft(
+    thumbs: Path = typer.Option(
+        ...,
+        "--thumbs",
+        help="Root of sorted shards (…/sorted or a single class folder)",
+    ),
+    out: Path = typer.Option(
+        ...,
+        "--out",
+        help="Output root for draft LabelMe JSON + manifest.jsonl",
+    ),
+    classes: str = typer.Option(
+        "turtle-surface,turtle-deep",
+        "--classes",
+        help="Comma-separated class folder names to include",
+    ),
+    backend: str = typer.Option(
+        "box",
+        "--backend",
+        help="Draft backend: box (inset rectangle) or threshold (simple silhouette)",
+    ),
+    limit: int = typer.Option(
+        None,
+        "--limit",
+        help="Process only the first N thumbs (smoke runs)",
+    ),
+    overwrite: bool = typer.Option(
+        False,
+        "--overwrite",
+        help="Replace existing draft LabelMe JSON files",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Enumerate only; print counts; write nothing",
+    ),
+):
+    """Generate draft turtle polygons on 224×224 sorted thumbs (no yolo_finds)."""
+    return outline_draft_command(
+        thumbs=thumbs,
+        out=out,
+        classes=classes,
+        backend=backend,
+        limit=limit,
+        overwrite=overwrite,
+        dry_run=dry_run,
+    )
+
 
 def main():
     """Main entry point for symsorter CLI"""

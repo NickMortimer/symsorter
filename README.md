@@ -17,6 +17,7 @@ A CLIP/DINO-based image classification and dataset curation tool with a fast des
 - Write SymSorter class decisions back into source annotation JSON
 - Merge many `classifications.json` files into one COCO JSON
 - Sort and shard classified images into train-ready folder layouts
+- Draft turtle outline polygons on sorted 224×224 thumbs (`outline-draft`)
 
 ## Installation
 
@@ -137,6 +138,18 @@ Available commands:
 - `merge-coco ROOT`
   - Merge all nested `classifications.json` files into one COCO JSON.
   - Options: `--out`, `--exclude-hidden`
+
+- `outline-draft`
+  - Write draft LabelMe polygons on sorted 224×224 thumbs (thumb-native; no `yolo_finds`).
+  - Options: `--thumbs`, `--out`, `--classes`, `--backend` (`box`|`threshold`), `--limit`, `--overwrite`, `--dry-run`
+  - Example:
+    ```bash
+    symsorter outline-draft \
+      --thumbs /path/to/sorted \
+      --out /path/to/outline_drafts \
+      --backend box \
+      --limit 50
+    ```
 
 ## GUI Controls
 
