@@ -181,7 +181,11 @@ Common shortcuts:
 - `Ctrl+=` / `Ctrl+-`: Thumbnail size
 - `Shift+Ctrl+=` / `Shift+Ctrl+-`: Crop zoom
 - Double-click image: sort by visual similarity
-- `O`: Outline viewer — multi-polygon view/edit (SAM point/box, lasso cleanup, delete)
+- `O`: Outline viewer — zoomable multi-polygon editor (vertex drag, add point, lasso−pts, eraser, SAM, delete)
+  - Default view fits polygons + 10% pad; mouse wheel zooms around pointer; `F` refits; Alt/right-drag pans
+  - **Edit**: drag vertices (X-AnyLabeling-style); click an edge to insert a point
+  - **Lasso (−pts)**: delete vertices inside the lasso (keeps ≥3)
+  - **Eraser**: brush-remove nearby vertices
 - `Shift+O`: Toggle outline overlays on grid thumbnails (works with crop zoom)
 - `P`: In-grid SAM click-point — **adds** a polygon (multi-turtle OK; use XL/XXL)
 - `B`: In-grid SAM drag-box — **adds** a polygon
