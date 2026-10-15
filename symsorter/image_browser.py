@@ -76,8 +76,9 @@ class ImageBrowser(QMainWindow,
         layout.addWidget(self.view)
 
         # Defaults needed by menus/handlers
-        self.icon_sizes = {"Small": 96, "Medium": 128, "Large": 160, "XL": 196}
-        self.current_size_name = getattr(self, "current_size_name", "Medium")
+        # XL/XXL are large enough for in-grid SAM point/box prompting.
+        self.icon_sizes = {"Small": 96, "Medium": 128, "Large": 160, "XL": 224, "XXL": 336}
+        self.current_size_name = getattr(self, "current_size_name", "XL")
         self.icon_size = self.icon_sizes[self.current_size_name]
         self.update_placeholder_icon()
         self.show_classification_labels = False
@@ -143,6 +144,8 @@ class ImageBrowser(QMainWindow,
         self.classification_viewer = None  # Classification viewer window
         self.show_classification_labels = False
         self.show_outline_overlays = True  # draw sibling LabelMe polygons on grid thumbs
+        self.outline_sam_model = "sam_b.pt"
+        self.outline_sam_device = None  # Ultralytics default (mps/cpu)
         self.current_sort_mode = None  # 'class' when sorting by class
         
         # Create a simple placeholder icon (will be updated with zoom)
@@ -175,6 +178,12 @@ class ImageBrowser(QMainWindow,
         except Exception:
             pass
         self.view.doubleClicked.connect(self.on_double_click)
+
+        # In-grid SAM point/box prompting (works best at XL/XXL)
+        from .ui.grid_outline_prompt import GridOutlinePromptFilter
+
+        self._grid_outline_prompt = GridOutlinePromptFilter(self)
+        self._grid_outline_prompt.ensure_installed()
 
         # Set up menus and toolbar
         self.setup_menus_and_toolbar()
@@ -286,6 +295,64 @@ class ImageBrowser(QMainWindow,
         tip = "on" if self.show_outline_overlays else "off"
         if hasattr(self, "statusBar") and self.statusBar():
             self.statusBar().showMessage(f"Outline overlays {tip}", 3000)
+
+    def set_outline_prompt_mode(self, mode: str) -> None:
+        """Enable in-grid SAM prompting: ``off`` | ``point`` | ``box``."""
+        if not hasattr(self, "_grid_outline_prompt"):
+            return
+        self._grid_outline_prompt.set_mode(mode)
+        # Keep menu checks in sync if present
+        for name, value in (
+            ("outline_prompt_off_action", "off"),
+            ("outline_prompt_point_action", "point"),
+            ("outline_prompt_box_action", "box"),
+        ):
+            act = getattr(self, name, None)
+            if act is not None:
+                act.setChecked(mode == value)
+
+    def refresh_outline_icon(self, filename: str) -> None:
+        """Drop cached icons for one thumb and reload it (after SAM save)."""
+        import os
+
+        key_fn = os.path.basename(filename)
+        if hasattr(self, "_cache"):
+            drop = [
+                k
+                for k in list(self._cache.image_cache.keys())
+                if isinstance(k, tuple) and k and k[0] == key_fn
+            ]
+            for k in drop:
+                self._cache.image_cache.pop(k, None)
+                if k in self._cache.cache_access_order:
+                    self._cache.cache_access_order.remove(k)
+
+        # Find model row and re-queue load
+        model = getattr(self, "model", None)
+        if not model:
+            return
+        for row in range(model.rowCount()):
+            it = model.item(row)
+            if not it:
+                continue
+            fn = it.data(Qt.UserRole)
+            if fn != filename and os.path.basename(str(fn)) != key_fn:
+                continue
+            # Clear to placeholder then load
+            if hasattr(self, "placeholder_icon"):
+                it.setIcon(self.placeholder_icon)
+            folder = getattr(self, "folder", "") or ""
+            file_path = os.path.join(folder, key_fn) if folder else key_fn
+            if hasattr(self, "load_image_batch"):
+                # Reuse single-index load path
+                from .core.image_worker import ImageLoadWorker
+
+                worker = ImageLoadWorker(
+                    row, file_path, self.icon_size, self.crop_size, cache_manager=self
+                )
+                worker.signals.imageLoaded.connect(self.update_image)
+                self.thread_pool.start(worker)
+            break
 
     def clear_caches(self):
         return self._cache.clear()

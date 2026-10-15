@@ -129,6 +129,39 @@ def build_menus(window):
     view_menu.addAction(outline_overlay_action)
     window.show_outline_overlays_action = outline_overlay_action
 
+    # In-grid SAM prompting (stay in icon view — best at XL/XXL)
+    prompt_menu = view_menu.addMenu('Outline &Prompt (grid)')
+    window.outline_prompt_group = QActionGroup(window)
+    window.outline_prompt_group.setExclusive(True)
+
+    prompt_off = QAction('&Off', window)
+    prompt_off.setCheckable(True)
+    prompt_off.setChecked(True)
+    prompt_off.setShortcut(QKeySequence('Shift+P'))
+    prompt_off.setStatusTip('Disable in-grid SAM prompting')
+    prompt_off.triggered.connect(lambda: window.set_outline_prompt_mode('off'))
+    window.outline_prompt_group.addAction(prompt_off)
+    prompt_menu.addAction(prompt_off)
+    window.outline_prompt_off_action = prompt_off
+
+    prompt_point = QAction('Click &Point → SAM', window)
+    prompt_point.setCheckable(True)
+    prompt_point.setShortcut(QKeySequence('P'))
+    prompt_point.setStatusTip('Click on a grid thumb to seed SAM (stay in grid)')
+    prompt_point.triggered.connect(lambda: window.set_outline_prompt_mode('point'))
+    window.outline_prompt_group.addAction(prompt_point)
+    prompt_menu.addAction(prompt_point)
+    window.outline_prompt_point_action = prompt_point
+
+    prompt_box = QAction('Drag &Box → SAM', window)
+    prompt_box.setCheckable(True)
+    prompt_box.setShortcut(QKeySequence('B'))
+    prompt_box.setStatusTip('Drag a box on a grid thumb to prompt SAM')
+    prompt_box.triggered.connect(lambda: window.set_outline_prompt_mode('box'))
+    window.outline_prompt_group.addAction(prompt_box)
+    prompt_menu.addAction(prompt_box)
+    window.outline_prompt_box_action = prompt_box
+
     view_menu.addSeparator()
 
     # Thumbnail size controls
@@ -214,5 +247,8 @@ def build_menus(window):
     toolbar.addAction(sort_by_class_action)
     toolbar.addAction(outline_action)
     toolbar.addAction(outline_overlay_action)
+    toolbar.addAction(prompt_point)
+    toolbar.addAction(prompt_box)
+    toolbar.addAction(prompt_off)
 
 

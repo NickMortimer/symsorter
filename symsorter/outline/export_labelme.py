@@ -112,3 +112,66 @@ def write_labelme_json(path: Path, data: dict[str, Any], overwrite: bool = False
         json.dump(data, f, indent=2, ensure_ascii=False)
         f.write("\n")
     return True
+
+
+def upsert_turtle_polygon(
+    path: Path,
+    *,
+    image_path: str,
+    image_height: int,
+    image_width: int,
+    points: list[list[float]],
+    flags: dict[str, Any] | None = None,
+    label: str = "turtle",
+) -> dict[str, Any]:
+    """Write/replace turtle polygon shapes; keep other shapes (e.g. length/width lines)."""
+    existing = load_labelme_json(path) or {
+        "version": "5.0.1",
+        "flags": {},
+        "shapes": [],
+        "imagePath": image_path,
+        "imageData": None,
+        "imageHeight": image_height,
+        "imageWidth": image_width,
+    }
+
+    kept: list[dict[str, Any]] = []
+    for shape in existing.get("shapes") or []:
+        if not isinstance(shape, dict):
+            continue
+        # Drop previous turtle polygons; keep measurement lines / other labels.
+        if shape.get("shape_type") == "polygon" and (shape.get("label") or "") == label:
+            continue
+        kept.append(shape)
+
+    shape_flags: dict[str, Any] = {
+        "draft": True,
+        "backend": None,
+        "det_index": None,
+        "turtle_group_id": None,
+        "view": None,
+        "blur": None,
+    }
+    if flags:
+        shape_flags.update(flags)
+
+    kept.append(
+        {
+            "label": label,
+            "points": points,
+            "group_id": None,
+            "shape_type": "polygon",
+            "flags": shape_flags,
+        }
+    )
+
+    existing["shapes"] = kept
+    existing["imagePath"] = image_path
+    existing["imageHeight"] = image_height
+    existing["imageWidth"] = image_width
+    existing.setdefault("version", "5.0.1")
+    existing.setdefault("flags", {})
+    existing["imageData"] = existing.get("imageData", None)
+
+    write_labelme_json(path, existing, overwrite=True)
+    return existing

@@ -183,6 +183,9 @@ Common shortcuts:
 - Double-click image: sort by visual similarity
 - `O`: Outline viewer — show sibling LabelMe polygons on the selected thumb(s)
 - `Shift+O`: Toggle outline overlays on grid thumbnails
+- `P`: In-grid SAM click-point prompt (stay in icon view; use XL/XXL)
+- `B`: In-grid SAM drag-box prompt
+- `Shift+P`: Turn outline prompt mode off
 
 Class assignment shortcuts come from your class file `keystroke` values.
 

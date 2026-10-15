@@ -246,6 +246,19 @@ def _points_from_sam_result(result: Any) -> list[list[float]] | None:
     return cleaned if len(cleaned) >= 3 else None
 
 
+def _sam_source(image_path: Path) -> Any:
+    """Prefer BGR ndarray (turtledrone path); fall back to file path."""
+    try:
+        import cv2  # type: ignore
+
+        im = cv2.imread(str(image_path))
+        if im is not None:
+            return im
+    except ImportError:
+        pass
+    return str(image_path)
+
+
 def sam_polygon(
     image_path: Path,
     model: Any | None = None,
@@ -254,73 +267,83 @@ def sam_polygon(
     inset: int = DEFAULT_BOX_INSET,
     sam_model: str = DEFAULT_SAM_MODEL,
     device: str | None = None,
+    bboxes: list[float] | list[list[float]] | None = None,
+    points: list[list[float]] | None = None,
+    point_labels: list[int] | None = None,
 ) -> DraftPolygon:
-    """Ultralytics SAM draft: inset-box prompt → mask polygon in thumb space."""
+    """Ultralytics SAM draft in thumb space.
+
+    Prompt priority:
+    1. Explicit ``points`` (click seeds; labels default to foreground=1)
+    2. Explicit ``bboxes`` (user box, XYXY)
+    3. Fallback inset full-thumb box (batch CLI default)
+    """
     if model is None:
         model = load_sam_model(sam_model=sam_model, device=device)
     device = device if device is not None else getattr(model, "_symsorter_device", None)
-    bboxes = _prompt_bbox_xyxy(size=size, inset=inset)
-
-    # Prefer BGR ndarray path used in turtledrone; fall back to file path.
-    try:
-        import cv2  # type: ignore
-
-        im = cv2.imread(str(image_path))
-        source: Any = im if im is not None else str(image_path)
-    except ImportError:
-        source = str(image_path)
 
     predict_kwargs: dict[str, Any] = {
-        "bboxes": bboxes,
         "verbose": False,
         "save": False,
     }
     if device is not None:
         predict_kwargs["device"] = device
 
+    prompt_kind = "inset_box"
+    used_bboxes: list[float] | list[list[float]] | None = None
+    used_points: list[list[float]] | None = None
+
+    if points:
+        used_points = [[float(p[0]), float(p[1])] for p in points if len(p) >= 2]
+        if not used_points:
+            raise ValueError("points prompt was empty")
+        labels = point_labels
+        if labels is None:
+            labels = [1] * len(used_points)
+        if len(labels) != len(used_points):
+            raise ValueError("point_labels length must match points")
+        predict_kwargs["points"] = used_points
+        predict_kwargs["labels"] = labels
+        prompt_kind = "points"
+    elif bboxes is not None:
+        # Accept flat [x1,y1,x2,y2] or [[x1,y1,x2,y2], ...]
+        if bboxes and isinstance(bboxes[0], (int, float)):
+            used_bboxes = [float(v) for v in bboxes]  # type: ignore[arg-type]
+        else:
+            used_bboxes = bboxes
+        predict_kwargs["bboxes"] = used_bboxes
+        prompt_kind = "box"
+    else:
+        used_bboxes = _prompt_bbox_xyxy(size=size, inset=inset)
+        predict_kwargs["bboxes"] = used_bboxes
+        prompt_kind = "inset_box"
+
+    source = _sam_source(image_path)
     results = model(source, **predict_kwargs)
+    flags_base: dict[str, Any] = {
+        "draft": True,
+        "backend": "sam",
+        "sam_model": sam_model,
+        "prompt_kind": prompt_kind,
+    }
+    if used_bboxes is not None:
+        flags_base["prompt_bbox"] = used_bboxes
+    if used_points is not None:
+        flags_base["prompt_points"] = used_points
+
     if not results:
         draft = box_polygon(size=size, inset=inset)
-        return DraftPolygon(
-            points=draft.points,
-            backend="sam",
-            flags={
-                "draft": True,
-                "backend": "sam",
-                "fallback": "box",
-                "reason": "empty_results",
-                "sam_model": sam_model,
-                "prompt_bbox": bboxes,
-            },
-        )
+        flags_base.update({"fallback": "box", "reason": "empty_results"})
+        return DraftPolygon(points=draft.points, backend="sam", flags=flags_base)
 
-    points = _points_from_sam_result(results[0])
-    if points is None:
+    poly_points = _points_from_sam_result(results[0])
+    if poly_points is None:
         draft = box_polygon(size=size, inset=inset)
-        return DraftPolygon(
-            points=draft.points,
-            backend="sam",
-            flags={
-                "draft": True,
-                "backend": "sam",
-                "fallback": "box",
-                "reason": "no_mask",
-                "sam_model": sam_model,
-                "prompt_bbox": bboxes,
-            },
-        )
+        flags_base.update({"fallback": "box", "reason": "no_mask"})
+        return DraftPolygon(points=draft.points, backend="sam", flags=flags_base)
 
-    return DraftPolygon(
-        points=points,
-        backend="sam",
-        flags={
-            "draft": True,
-            "backend": "sam",
-            "sam_model": sam_model,
-            "prompt_bbox": bboxes,
-            "n_points": len(points),
-        },
-    )
+    flags_base["n_points"] = len(poly_points)
+    return DraftPolygon(points=poly_points, backend="sam", flags=flags_base)
 
 
 def draft_polygon(
