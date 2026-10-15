@@ -305,6 +305,28 @@ def erase_points_near(
     return kept, removed
 
 
+def next_index(
+    current: int,
+    n: int,
+    *,
+    needs_work: list[bool] | None = None,
+    skip_done: bool = False,
+) -> int | None:
+    """Next index after ``current`` in a ring of size ``n``.
+
+    When ``skip_done`` and ``needs_work`` are set, prefer the next entry where
+    ``needs_work[i]`` is True. Returns None if ``n <= 1``.
+    """
+    if n <= 1:
+        return None
+    start = current % n
+    for step in range(1, n + 1):
+        cand = (start + step) % n
+        if not skip_done or needs_work is None or needs_work[cand]:
+            return cand
+    return (start + 1) % n
+
+
 def hit_polygon_index(
     polygons: list[dict[str, Any]],
     x: float,

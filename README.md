@@ -184,7 +184,7 @@ Common shortcuts:
 - `O`: Outline viewer — zoomable multi-polygon editor
   - Tools: `E` edit · `A` add point · `L` lasso−pts · `R` eraser · `P`/`B` SAM · `D` del poly · `H` pan
   - `K` lock selected as quality=good (skips redo); `Shift+K` unlock
-  - `Ctrl+S` save · `N` / `Ctrl+Enter` **Save & Next** · `F` fit · wheel zoom · Alt/right-drag pan
+  - `Ctrl+S` save · `N` / `Ctrl+Enter` **Save & Next** (walks the current grid order from the selected thumb; skips quality-locked) · `F` fit · wheel zoom · Alt/right-drag pan
   - Grid box/point prompts use **crop-relative** coords when crop zoom is on
 - `Shift+O`: Toggle outline overlays (crop-aware; locked polys draw green)
 - `Shift+W`: Sort by outline needs-work (unlocked/empty first, locked last)

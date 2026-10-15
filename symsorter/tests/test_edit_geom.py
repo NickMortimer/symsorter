@@ -11,6 +11,7 @@ from symsorter.outline.edit_geom import (
     map_icon_local_to_image,
     nearest_edge,
     nearest_vertex,
+    next_index,
     padded_bbox,
     polygons_bbox,
     zoom_at_pointer,
@@ -101,6 +102,17 @@ def test_eraser_removes_nearby() -> None:
     assert n == 1
     assert [50.0, 0.0] not in kept
     assert len(kept) == 4
+
+
+def test_next_index_skips_done() -> None:
+    assert next_index(0, 1) is None
+    assert next_index(0, 3, skip_done=False) == 1
+    # needs_work: True, False, True — from 0 skip done → land on 2
+    assert next_index(0, 3, needs_work=[True, False, True], skip_done=True) == 2
+    # from 2, next needing work wraps to 0
+    assert next_index(2, 3, needs_work=[True, False, True], skip_done=True) == 0
+    # all done → still advances one step
+    assert next_index(1, 3, needs_work=[False, False, False], skip_done=True) == 2
 
 
 def test_center_crop_xyxy_matches_worker() -> None:

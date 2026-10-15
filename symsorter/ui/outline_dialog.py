@@ -38,6 +38,7 @@ from symsorter.outline.edit_geom import (
     insert_vertex,
     nearest_edge,
     nearest_vertex,
+    next_index,
     zoom_at_pointer,
 )
 from symsorter.outline.export_labelme import (
@@ -48,6 +49,7 @@ from symsorter.outline.export_labelme import (
     set_polygon_locked,
     set_turtle_polygons,
     simplify_polyline,
+    thumb_needs_outline_work,
 )
 from symsorter.outline.filename import parse_thumb_filename
 
@@ -845,13 +847,18 @@ class OutlineViewerDialog(QDialog):
     def show_prev(self) -> None:
         if not self.entries or not self._confirm_leave_if_dirty():
             return
+        if len(self.entries) <= 1:
+            return
         self.index = (self.index - 1) % len(self.entries)
+        self._sync_browser_to_current()
         self.refresh()
 
     def show_next(self) -> None:
         if not self.entries or not self._confirm_leave_if_dirty():
             return
-        self.index = (self.index + 1) % len(self.entries)
+        if not self._advance_index(skip_done=False):
+            return
+        self._sync_browser_to_current()
         self.refresh()
 
     def _push_scene(self, *, refit: bool) -> None:
@@ -1028,17 +1035,57 @@ class OutlineViewerDialog(QDialog):
         self.canvas.set_selected(self._selected)
         self._update_title()
 
+    def _advance_index(self, *, skip_done: bool = True) -> bool:
+        """Move ``self.index`` forward. Prefer unlocked/empty thumbs when skipping."""
+        n = len(self.entries)
+        needs = None
+        if skip_done:
+            needs = [thumb_needs_outline_work(p) for p, _ in self.entries]
+        nxt = next_index(
+            self.index, n, needs_work=needs, skip_done=skip_done
+        )
+        if nxt is None:
+            return False
+        self.index = nxt
+        return True
+
+    def _sync_browser_to_current(self) -> None:
+        """Keep the grid selection/current item aligned with the viewer."""
+        parent = self.parent()
+        if parent is None or not self.entries:
+            return
+        view = getattr(parent, "view", None)
+        model = getattr(parent, "model", None)
+        if view is None or model is None:
+            return
+        fn = self.entries[self.index][1]
+        for row in range(model.rowCount()):
+            item = model.item(row)
+            if item is None:
+                continue
+            if item.data(Qt.UserRole) == fn:
+                index = model.indexFromItem(item)
+                view.setCurrentIndex(index)
+                view.scrollTo(index)
+                break
+
     def save_and_next(self) -> None:
-        """Save current outlines, then advance (skips confirming dirty)."""
+        """Save current outlines, then advance to the next thumb that needs work."""
         if not self.entries:
             return
         if not self.save_current():
             return
         if len(self.entries) <= 1:
-            self.status_label.setText("Saved. (Only one image in this session.)")
+            self.status_label.setText("Saved. (Only one image loaded in the grid.)")
             return
-        self.index = (self.index + 1) % len(self.entries)
+        prev_name = self.entries[self.index][1]
+        self._advance_index(skip_done=True)
+        self._sync_browser_to_current()
         self.refresh()
+        cur_name = self.entries[self.index][1]
+        self.status_label.setText(
+            f"Saved {prev_name} → now {self.index + 1}/{len(self.entries)}: {cur_name}"
+        )
 
     def save_current(self) -> bool:
         if not self.entries:
@@ -1078,7 +1125,12 @@ class OutlineViewerDialog(QDialog):
 
 
 def open_outline_viewer_for_browser(browser: QWidget) -> None:
-    """Collect selected (or current) thumbs from ImageBrowser and open viewer."""
+    """Open outline viewer over the current grid order (for Save & Next).
+
+    - **Multi-select (≥2)**: edit just that selection.
+    - **Otherwise**: walk ``browser.image_files`` (respects Shift+W sort), starting
+      at the current/selected thumb so ``N`` / Save & Next advances through the set.
+    """
     folder = getattr(browser, "folder", "") or ""
     if not folder:
         QMessageBox.information(
@@ -1093,28 +1145,45 @@ def open_outline_viewer_for_browser(browser: QWidget) -> None:
     if view is None:
         return
 
-    indexes = view.selectedIndexes()
-    filenames: list[str] = []
-    for index in indexes:
+    selected: list[str] = []
+    for index in view.selectedIndexes():
         fn = index.data(Qt.UserRole)
-        if fn and fn not in filenames:
-            filenames.append(fn)
+        if fn and fn not in selected:
+            selected.append(fn)
 
-    if not filenames:
-        current = view.currentIndex()
-        if current.isValid():
-            fn = current.data(Qt.UserRole)
-            if fn:
-                filenames = [fn]
+    current_fn: str | None = None
+    current = view.currentIndex()
+    if current.isValid():
+        current_fn = current.data(Qt.UserRole)
+    if current_fn is None and selected:
+        current_fn = selected[0]
 
-    if not filenames:
+    grid_files = [
+        fn for fn in (getattr(browser, "image_files", None) or []) if fn
+    ]
+
+    if len(selected) >= 2:
+        filenames = selected
+        start_index = 0
+    elif grid_files:
+        filenames = grid_files
+        start_index = (
+            filenames.index(current_fn) if current_fn in filenames else 0
+        )
+    elif current_fn:
+        filenames = [current_fn]
+        start_index = 0
+    elif selected:
+        filenames = selected
+        start_index = 0
+    else:
         QMessageBox.information(
             browser,
             "Outline viewer",
-            "Select one or more thumbs in the grid, then press O.",
+            "Select a thumb in the grid (or load images), then press O.",
         )
         return
 
     entries: list[tuple[Path, str]] = [(folder_path / fn, fn) for fn in filenames]
-    dlg = OutlineViewerDialog(browser, entries=entries, start_index=0)
+    dlg = OutlineViewerDialog(browser, entries=entries, start_index=start_index)
     dlg.exec()
