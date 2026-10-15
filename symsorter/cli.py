@@ -168,6 +168,7 @@ from .commands.prepare_dataset import (
     update_json_from_symsorter_command,
 )
 from .commands.outline_draft import outline_draft_command
+from .commands.outline_import_boxes import outline_import_boxes_command
 from .commands.remap_sorted_npz import remap_sorted_npz_command
 
 @app.command(name="sort")
@@ -280,6 +281,86 @@ def outline_draft(
         dry_run=dry_run,
         sam_model=sam_model,
         device=device,
+    )
+
+
+@app.command(name="outline-import-boxes")
+def outline_import_boxes(
+    thumbs: Path = typer.Option(
+        ...,
+        "--thumbs",
+        help="Root of sorted shards (…/sorted or a single class folder)",
+    ),
+    yolo_finds: Path = typer.Option(
+        ...,
+        "--yolo-finds",
+        help="yolo_finds root with {FLIGHT}/images and/or slices",
+    ),
+    metadata_root: Path = typer.Option(
+        None,
+        "--metadata-root",
+        help="Optional root of *_crops_metadata.csv (Timor2 turtle_v01_run02)",
+    ),
+    classes: str = typer.Option(
+        "turtle-surface,turtle-deep",
+        "--classes",
+        help="Comma-separated class folder names to include",
+    ),
+    limit: int = typer.Option(
+        None,
+        "--limit",
+        help="Process only the first N thumbs (smoke runs)",
+    ),
+    overwrite: bool = typer.Option(
+        False,
+        "--overwrite",
+        help="Replace existing turtle_box rectangles beside thumbs",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Match only; write nothing",
+    ),
+    run_sam: bool = typer.Option(
+        False,
+        "--sam/--no-sam",
+        help="After importing boxes, run SAM on each box (turtledrone segment.py pattern)",
+    ),
+    sam_model: str = typer.Option(
+        "sam_b.pt",
+        "--sam-model",
+        help="Ultralytics SAM weights when --sam is set",
+    ),
+    device: str = typer.Option(
+        None,
+        "--device",
+        help="Torch device for SAM (cpu, mps, cuda:0)",
+    ),
+    min_match_score: float = typer.Option(
+        0.5,
+        "--min-match-score",
+        help="Minimum cv2.matchTemplate score when metadata is unavailable",
+    ),
+    out: Path = typer.Option(
+        None,
+        "--out",
+        help="Optional directory for import_boxes_manifest.jsonl",
+    ),
+):
+    """Copy YOLO/slice boxes onto sorted 224 thumbs (for SAM prompts)."""
+    return outline_import_boxes_command(
+        thumbs=thumbs,
+        yolo_finds=yolo_finds,
+        metadata_root=metadata_root,
+        classes=classes,
+        limit=limit,
+        overwrite=overwrite,
+        dry_run=dry_run,
+        run_sam=run_sam,
+        sam_model=sam_model,
+        device=device,
+        min_match_score=min_match_score,
+        out=out,
     )
 
 

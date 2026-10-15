@@ -26,6 +26,86 @@ def load_labelme_json(path: Path) -> dict[str, Any] | None:
         return None
 
 
+def extract_rectangles(
+    data: dict[str, Any] | None, *, label: str | None = "turtle_box"
+) -> list[dict[str, Any]]:
+    """Return rectangle shapes (2-point xyxy) from a LabelMe document."""
+    if not data:
+        return []
+    shapes = data.get("shapes")
+    if not isinstance(shapes, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for shape in shapes:
+        if not isinstance(shape, dict):
+            continue
+        if shape.get("shape_type") not in (None, "rectangle"):
+            continue
+        shape_label = shape.get("label") or "turtle_box"
+        if label is not None and shape_label != label:
+            continue
+        points = shape.get("points")
+        if not isinstance(points, list) or len(points) < 2:
+            continue
+        try:
+            x1, y1 = float(points[0][0]), float(points[0][1])
+            x2, y2 = float(points[1][0]), float(points[1][1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        out.append(
+            {
+                "label": shape_label,
+                "points": [[min(x1, x2), min(y1, y2)], [max(x1, x2), max(y1, y2)]],
+                "flags": shape.get("flags") if isinstance(shape.get("flags"), dict) else {},
+                "shape_type": "rectangle",
+            }
+        )
+    return out
+
+
+def upsert_turtle_boxes(
+    path: Path,
+    boxes: list[dict[str, Any]],
+    *,
+    image_path: str,
+    image_height: int,
+    image_width: int,
+    box_label: str = "turtle_box",
+) -> dict[str, Any]:
+    """Replace ``turtle_box`` rectangles; keep polygons, lines, and other labels."""
+    existing = load_labelme_json(path) or _blank_doc(
+        image_path=image_path, image_height=image_height, image_width=image_width
+    )
+    kept: list[dict[str, Any]] = []
+    for shape in existing.get("shapes") or []:
+        if not isinstance(shape, dict):
+            continue
+        if (
+            shape.get("shape_type") == "rectangle"
+            and (shape.get("label") or "") == box_label
+        ):
+            continue
+        kept.append(shape)
+    for box in boxes:
+        kept.append(
+            {
+                "label": box.get("label") or box_label,
+                "points": box["points"],
+                "group_id": box.get("group_id"),
+                "shape_type": "rectangle",
+                "flags": _shape_flags(box.get("flags")),
+            }
+        )
+    existing["shapes"] = kept
+    return _finalize_doc(
+        path,
+        existing,
+        image_path=image_path,
+        image_height=image_height,
+        image_width=image_width,
+    )
+
+
 def extract_polygons(
     data: dict[str, Any] | None, *, label: str | None = "turtle"
 ) -> list[dict[str, Any]]:

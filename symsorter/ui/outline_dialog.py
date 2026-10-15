@@ -43,6 +43,7 @@ from symsorter.outline.edit_geom import (
 )
 from symsorter.outline.export_labelme import (
     extract_polygons,
+    extract_rectangles,
     is_polygon_locked,
     labelme_path_for_thumb,
     load_labelme_json,
@@ -713,6 +714,13 @@ class OutlineViewerDialog(QDialog):
         self.lock_btn.clicked.connect(self.toggle_lock_selected)
         nav.addWidget(self.lock_btn)
 
+        self.sam_boxes_btn = QPushButton("SAM from boxes")
+        self.sam_boxes_btn.setToolTip(
+            "Run SAM on imported turtle_box rectangles (yolo_finds / slices)"
+        )
+        self.sam_boxes_btn.clicked.connect(self.sam_from_imported_boxes)
+        nav.addWidget(self.sam_boxes_btn)
+
         self.del_btn = QPushButton("Delete selected")
         self.del_btn.clicked.connect(self.delete_selected)
         nav.addWidget(self.del_btn)
@@ -765,6 +773,7 @@ class OutlineViewerDialog(QDialog):
         # Lock / nav / save
         self._bind_shortcut("K", self.toggle_lock_selected)
         self._bind_shortcut("Shift+K", lambda: self.toggle_lock_selected(force_unlock=True))
+        self._bind_shortcut("S", self.sam_from_imported_boxes)
         self._bind_shortcut("F", self._fit_view)
         self._bind_shortcut("Left", self.show_prev)
         self._bind_shortcut("Right", self.show_next)
@@ -1010,6 +1019,57 @@ class OutlineViewerDialog(QDialog):
         self.status_label.setText(
             f"Deleted. {len(self._polygons)} polygon(s) left. Save when done."
         )
+
+    def sam_from_imported_boxes(self) -> None:
+        """Run SAM on sibling ``turtle_box`` rectangles (turtledrone segment.py pattern)."""
+        if not self.entries:
+            return
+        thumb_path, _ = self._current_paths()
+        rects = extract_rectangles(load_labelme_json(labelme_path_for_thumb(thumb_path)))
+        if not rects:
+            self.status_label.setText(
+                "No turtle_box rectangles — run: symsorter outline-import-boxes …"
+            )
+            return
+        try:
+            model = self._ensure_sam()
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "SAM failed", str(exc))
+            return
+        added = 0
+        for rect in rects:
+            (x1, y1), (x2, y2) = rect["points"]
+            try:
+                draft = sam_polygon(
+                    thumb_path,
+                    model=model,
+                    bboxes=[x1, y1, x2, y2],
+                    device=self.device,
+                    sam_model=self.sam_model_name,
+                )
+                flags = dict(draft.flags)
+                flags["source"] = "yolo_box_sam"
+                flags["draft"] = True
+                self._polygons.append(
+                    {
+                        "label": "turtle",
+                        "points": draft.points,
+                        "flags": flags,
+                        "shape_type": "polygon",
+                    }
+                )
+                added += 1
+            except Exception as exc:  # noqa: BLE001
+                self.status_label.setText(f"SAM box failed: {exc}")
+        if added:
+            self._selected = len(self._polygons) - 1
+            self._dirty = True
+            self._push_scene(refit=False)
+            self.canvas.set_selected(self._selected)
+            self._update_title()
+            self.status_label.setText(
+                f"SAM added {added} polygon(s) from boxes. Save when done."
+            )
 
     def toggle_lock_selected(self, force_unlock: bool = False) -> None:
         """Mark selected polygon quality-good (locked) so it won't be redone."""

@@ -139,6 +139,20 @@ Available commands:
   - Merge all nested `classifications.json` files into one COCO JSON.
   - Options: `--out`, `--exclude-hidden`
 
+- `outline-import-boxes` — copy YOLO/slice boxes onto sorted 224 thumbs (turtle-repo expand + patch geometry; optional `--sam`)
+- `outline-import-boxes`
+  - Copy YOLO / SHAI-slice boxes onto sorted 224 thumbs as LabelMe `turtle_box` rectangles (for SAM).
+  - Ports turtledrone `expand` (224 window) + `bbox_to_patch` clamp; prefers `*_crops_metadata.csv`, else `cv2.matchTemplate` on full JPG or slices.
+  - Options: `--thumbs`, `--yolo-finds`, `--metadata-root`, `--sam`, `--limit`, `--overwrite`, `--out`
+  - Example:
+    ```bash
+    symsorter outline-import-boxes \
+      --thumbs /Volumes/turtle_apfs/sorted \
+      --yolo-finds /Volumes/turtle_apfs/yolo_finds \
+      --overwrite --limit 100
+    # then in Outline viewer: S / “SAM from boxes”, or add --sam
+    ```
+
 - `outline-draft`
   - Write draft LabelMe polygons **beside each thumb** (`foo.jpg` → `foo.json`; thumb-native; no `yolo_finds`).
   - Default backend: Ultralytics SAM (`pip install 'symsorter[sam]'`). Also `box` and `threshold`.
@@ -184,6 +198,7 @@ Common shortcuts:
 - `O`: Outline viewer — zoomable multi-polygon editor
   - Tools: `E` edit · `A` add point · `L` lasso−pts · `R` eraser · `P`/`B` SAM · `D` del poly · `H` pan
   - `K` lock selected as quality=good (skips redo); `Shift+K` unlock
+  - `S` / **SAM from boxes** — run SAM on imported `turtle_box` rectangles
   - `Ctrl+S` save · `N` / `Ctrl+Enter` **Save & Next** (walks the current grid order from the selected thumb; skips quality-locked) · `F` fit · wheel zoom · Alt/right-drag pan
   - Grid box/point prompts use **crop-relative** coords when crop zoom is on
 - `Shift+O`: Toggle outline overlays (crop-aware; locked polys draw green)
