@@ -147,7 +147,9 @@ def build_menus(window):
     prompt_point = QAction('Click &Point → SAM', window)
     prompt_point.setCheckable(True)
     prompt_point.setShortcut(QKeySequence('P'))
-    prompt_point.setStatusTip('Click on a grid thumb to seed SAM (stay in grid)')
+    prompt_point.setStatusTip(
+        'Click on a grid thumb to ADD a SAM polygon (multi-turtle OK; stay in grid)'
+    )
     prompt_point.triggered.connect(lambda: window.set_outline_prompt_mode('point'))
     window.outline_prompt_group.addAction(prompt_point)
     prompt_menu.addAction(prompt_point)
@@ -156,11 +158,22 @@ def build_menus(window):
     prompt_box = QAction('Drag &Box → SAM', window)
     prompt_box.setCheckable(True)
     prompt_box.setShortcut(QKeySequence('B'))
-    prompt_box.setStatusTip('Drag a box on a grid thumb to prompt SAM')
+    prompt_box.setStatusTip('Drag a box on a grid thumb to prompt SAM (adds another polygon)')
     prompt_box.triggered.connect(lambda: window.set_outline_prompt_mode('box'))
     window.outline_prompt_group.addAction(prompt_box)
     prompt_menu.addAction(prompt_box)
     window.outline_prompt_box_action = prompt_box
+
+    prompt_delete = QAction('&Delete polygon (click)', window)
+    prompt_delete.setCheckable(True)
+    prompt_delete.setShortcut(QKeySequence('D'))
+    prompt_delete.setStatusTip(
+        'Click a polygon on a grid thumb to delete it; Del = last; Shift+Del = clear all'
+    )
+    prompt_delete.triggered.connect(lambda: window.set_outline_prompt_mode('delete'))
+    window.outline_prompt_group.addAction(prompt_delete)
+    prompt_menu.addAction(prompt_delete)
+    window.outline_prompt_delete_action = prompt_delete
 
     view_menu.addSeparator()
 

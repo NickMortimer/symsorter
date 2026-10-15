@@ -29,6 +29,7 @@ def draw_polygons_on_pixmap(
     source_width: int,
     source_height: int,
     outline_only: bool = False,
+    selected_index: int | None = None,
 ) -> QPixmap:
     """Return a copy of ``pixmap`` with polygons scaled from source image coords."""
     if pixmap is None or pixmap.isNull() or not polygons:
@@ -43,23 +44,44 @@ def draw_polygons_on_pixmap(
 
     # Thicker relative stroke on tiny grid icons
     pen_w = 2 if canvas.width() >= 160 else 1
-    pen = QPen(QColor(0, 255, 200, 230))
-    pen.setWidth(pen_w)
-    painter.setPen(pen)
-    if outline_only:
-        painter.setBrush(Qt.NoBrush)
-    else:
-        painter.setBrush(QColor(0, 220, 180, 50))
 
-    for shape in polygons:
+    for i, shape in enumerate(polygons):
         pts = shape.get("points") or []
         if len(pts) < 3:
             continue
+        selected = selected_index is not None and i == selected_index
+        if selected:
+            pen = QPen(QColor(255, 80, 80, 240))
+            brush = QColor(255, 80, 80, 60)
+        else:
+            pen = QPen(QColor(0, 255, 200, 230))
+            brush = QColor(0, 220, 180, 50)
+        pen.setWidth(pen_w + (1 if selected else 0))
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush if outline_only and not selected else brush)
         poly = QPolygonF([QPointF(float(p[0]) * sx, float(p[1]) * sy) for p in pts])
         painter.drawPolygon(poly)
 
     painter.end()
     return canvas
+
+
+def shift_polygons(
+    polygons: list[dict[str, Any]],
+    *,
+    dx: float,
+    dy: float,
+) -> list[dict[str, Any]]:
+    """Translate polygon points (e.g. into a center-crop coordinate frame)."""
+    out: list[dict[str, Any]] = []
+    for poly in polygons:
+        pts = [[float(p[0]) - dx, float(p[1]) - dy] for p in (poly.get("points") or [])]
+        if len(pts) < 3:
+            continue
+        shifted = dict(poly)
+        shifted["points"] = pts
+        out.append(shifted)
+    return out
 
 
 def apply_outline_overlay_if_present(
@@ -69,21 +91,32 @@ def apply_outline_overlay_if_present(
     source_width: int | None = None,
     source_height: int | None = None,
     outline_only: bool = True,
+    crop_xyxy: tuple[int, int, int, int] | None = None,
+    selected_index: int | None = None,
 ) -> QPixmap:
-    """If sibling LabelMe has polygons, draw them on a copy of ``pixmap``."""
+    """If sibling LabelMe has polygons, draw them on a copy of ``pixmap``.
+
+    ``crop_xyxy`` is ``(left, top, right, bottom)`` in full-thumb pixels when the
+    pixmap is a center crop — polygons are shifted into crop space first.
+    """
     if pixmap is None or pixmap.isNull():
         return pixmap
     polygons = load_polygons_for_thumb(thumb_path)
     if not polygons:
         return pixmap
-    sw = source_width if source_width is not None else pixmap.width()
-    sh = source_height if source_height is not None else pixmap.height()
-    # Prefer LabelMe image size when available via first load — caller may pass
-    # raw pixmap size (pre-scale). For scaled icons, pass original w/h.
+    if crop_xyxy is not None:
+        left, top, right, bottom = crop_xyxy
+        polygons = shift_polygons(polygons, dx=float(left), dy=float(top))
+        sw = max(1, right - left)
+        sh = max(1, bottom - top)
+    else:
+        sw = source_width if source_width is not None else pixmap.width()
+        sh = source_height if source_height is not None else pixmap.height()
     return draw_polygons_on_pixmap(
         pixmap,
         polygons,
         source_width=sw,
         source_height=sh,
         outline_only=outline_only,
+        selected_index=selected_index,
     )

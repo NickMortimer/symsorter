@@ -181,10 +181,13 @@ Common shortcuts:
 - `Ctrl+=` / `Ctrl+-`: Thumbnail size
 - `Shift+Ctrl+=` / `Shift+Ctrl+-`: Crop zoom
 - Double-click image: sort by visual similarity
-- `O`: Outline viewer — show sibling LabelMe polygons on the selected thumb(s)
-- `Shift+O`: Toggle outline overlays on grid thumbnails
-- `P`: In-grid SAM click-point prompt (stay in icon view; use XL/XXL)
-- `B`: In-grid SAM drag-box prompt
+- `O`: Outline viewer — multi-polygon view/edit (SAM point/box, lasso cleanup, delete)
+- `Shift+O`: Toggle outline overlays on grid thumbnails (works with crop zoom)
+- `P`: In-grid SAM click-point — **adds** a polygon (multi-turtle OK; use XL/XXL)
+- `B`: In-grid SAM drag-box — **adds** a polygon
+- `D`: In-grid delete mode — click a polygon to remove it
+- `Del` / `Backspace`: Delete last turtle polygon on the selected thumb (when one exists)
+- `Shift+Del`: Clear all turtle polygons on the selected thumb
 - `Shift+P`: Turn outline prompt mode off
 
 Class assignment shortcuts come from your class file `keystroke` values.

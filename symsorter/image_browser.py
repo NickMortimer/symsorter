@@ -297,7 +297,7 @@ class ImageBrowser(QMainWindow,
             self.statusBar().showMessage(f"Outline overlays {tip}", 3000)
 
     def set_outline_prompt_mode(self, mode: str) -> None:
-        """Enable in-grid SAM prompting: ``off`` | ``point`` | ``box``."""
+        """Enable in-grid outline tools: ``off`` | ``point`` | ``box`` | ``delete``."""
         if not hasattr(self, "_grid_outline_prompt"):
             return
         self._grid_outline_prompt.set_mode(mode)
@@ -306,6 +306,7 @@ class ImageBrowser(QMainWindow,
             ("outline_prompt_off_action", "off"),
             ("outline_prompt_point_action", "point"),
             ("outline_prompt_box_action", "box"),
+            ("outline_prompt_delete_action", "delete"),
         ):
             act = getattr(self, name, None)
             if act is not None:

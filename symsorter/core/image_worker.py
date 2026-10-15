@@ -82,6 +82,7 @@ class ImageLoadWorker(QRunnable):
             
             # Process the image (crop if needed, then scale)
             processed_pixmap = raw_pixmap
+            crop_xyxy = None
             
             # Apply crop if specified
             if self.crop_size is not None and self.crop_size > 0:
@@ -96,6 +97,7 @@ class ImageLoadWorker(QRunnable):
                 crop_height = min(self.crop_size, orig_height)
                 
                 processed_pixmap = processed_pixmap.copy(crop_x, crop_y, crop_width, crop_height)
+                crop_xyxy = (crop_x, crop_y, crop_x + crop_width, crop_y + crop_height)
             
             # Scale to thumbnail size - always scale to match the requested icon size
             if self.icon_size == processed_pixmap.width() and self.icon_size == processed_pixmap.height():
@@ -115,15 +117,16 @@ class ImageLoadWorker(QRunnable):
                     transformation
                 )
 
-            # Draw sibling LabelMe polygons on the grid thumb when enabled.
-            # Skip when center-crop is active — polygon coords are full-thumb space.
-            if variant == "outline" and not (self.crop_size and self.crop_size > 0):
+            # Draw sibling LabelMe polygons on the grid thumb when enabled
+            # (including center-crop: polygons are shifted into crop space).
+            if variant == "outline":
                 scaled_pixmap = apply_outline_overlay_if_present(
                     scaled_pixmap,
                     self.file_path,
                     source_width=source_w,
                     source_height=source_h,
                     outline_only=True,
+                    crop_xyxy=crop_xyxy,
                 )
             
             if self.should_stop:
