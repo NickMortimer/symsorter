@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from symsorter.outline.edit_geom import (
+    center_crop_xyxy,
     delete_points_inside,
     erase_points_near,
     fit_view,
     insert_vertex,
+    map_icon_local_to_image,
     nearest_edge,
     nearest_vertex,
     padded_bbox,
@@ -99,3 +101,35 @@ def test_eraser_removes_nearby() -> None:
     assert n == 1
     assert [50.0, 0.0] not in kept
     assert len(kept) == 4
+
+
+def test_center_crop_xyxy_matches_worker() -> None:
+    assert center_crop_xyxy(224, 224, None) == (0.0, 0.0, 224.0, 224.0)
+    assert center_crop_xyxy(224, 224, 0) == (0.0, 0.0, 224.0, 224.0)
+    left, top, right, bottom = center_crop_xyxy(224, 224, 128)
+    assert (left, top, right, bottom) == (48.0, 48.0, 176.0, 176.0)
+
+
+def test_map_icon_accounts_for_crop() -> None:
+    # Icon shows center 128×128 of 224×224, scaled to 256×256
+    # Top-left of icon → image (48, 48); center of icon → image (112, 112)
+    tl = map_icon_local_to_image(
+        0.0, 0.0, icon_w=256, icon_h=256, img_w=224, img_h=224, crop_size=128
+    )
+    assert tl is not None
+    assert abs(tl[0] - 48.0) < 1.0
+    assert abs(tl[1] - 48.0) < 1.0
+
+    mid = map_icon_local_to_image(
+        128.0, 128.0, icon_w=256, icon_h=256, img_w=224, img_h=224, crop_size=128
+    )
+    assert mid is not None
+    assert abs(mid[0] - 112.0) < 1.0
+    assert abs(mid[1] - 112.0) < 1.0
+
+    # Without crop, mid of icon is mid of full image
+    mid_full = map_icon_local_to_image(
+        128.0, 128.0, icon_w=256, icon_h=256, img_w=224, img_h=224, crop_size=None
+    )
+    assert mid_full is not None
+    assert abs(mid_full[0] - 112.0) < 1.0

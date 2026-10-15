@@ -98,6 +98,16 @@ def build_menus(window):
     sort_by_class_action.triggered.connect(window.sort_by_class)
     view_menu.addAction(sort_by_class_action)
 
+    # Sort by outline quality / needs work
+    sort_outline_action = QAction('Sort by Outline &Needs Work', window)
+    sort_outline_action.setShortcut(QKeySequence('Shift+W'))
+    sort_outline_action.setStatusTip(
+        'Unlocked / missing turtle polygons first; quality-locked last'
+    )
+    sort_outline_action.triggered.connect(window.sort_by_outline_needs_work)
+    view_menu.addAction(sort_outline_action)
+    window.sort_outline_action = sort_outline_action
+
     # Show only classified images
     show_classified_action = QAction('Show &Classified Images', window)
     show_classified_action.setShortcut(QKeySequence('Ctrl+Shift+C'))

@@ -181,17 +181,14 @@ Common shortcuts:
 - `Ctrl+=` / `Ctrl+-`: Thumbnail size
 - `Shift+Ctrl+=` / `Shift+Ctrl+-`: Crop zoom
 - Double-click image: sort by visual similarity
-- `O`: Outline viewer — zoomable multi-polygon editor (vertex drag, add point, lasso−pts, eraser, SAM, delete)
-  - Default view fits polygons + 10% pad; mouse wheel zooms around pointer; `F` refits; Alt/right-drag pans
-  - **Edit**: drag vertices (X-AnyLabeling-style); click an edge to insert a point
-  - **Lasso (−pts)**: delete vertices inside the lasso (keeps ≥3)
-  - **Eraser**: brush-remove nearby vertices
-- `Shift+O`: Toggle outline overlays on grid thumbnails (works with crop zoom)
-- `P`: In-grid SAM click-point — **adds** a polygon (multi-turtle OK; use XL/XXL)
-- `B`: In-grid SAM drag-box — **adds** a polygon
-- `D`: In-grid delete mode — click a polygon to remove it
-- `Del` / `Backspace`: Delete last turtle polygon on the selected thumb (when one exists)
-- `Shift+Del`: Clear all turtle polygons on the selected thumb
+- `O`: Outline viewer — zoomable multi-polygon editor
+  - Tools: `E` edit · `A` add point · `L` lasso−pts · `R` eraser · `P`/`B` SAM · `D` del poly · `H` pan
+  - `K` lock selected as quality=good (skips redo); `Shift+K` unlock
+  - `Ctrl+S` save · `N` / `Ctrl+Enter` **Save & Next** · `F` fit · wheel zoom · Alt/right-drag pan
+  - Grid box/point prompts use **crop-relative** coords when crop zoom is on
+- `Shift+O`: Toggle outline overlays (crop-aware; locked polys draw green)
+- `Shift+W`: Sort by outline needs-work (unlocked/empty first, locked last)
+- `P` / `B` / `D`: In-grid SAM point / box / delete (multi-turtle; Del = last; Shift+Del = clear)
 - `Shift+P`: Turn outline prompt mode off
 
 Class assignment shortcuts come from your class file `keystroke` values.

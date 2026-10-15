@@ -9,12 +9,14 @@ from PySide6.QtCore import QEvent, QObject, QPoint, QRect, Qt
 from PySide6.QtWidgets import QApplication, QMessageBox, QRubberBand
 
 from symsorter.outline.backends import load_sam_model, sam_polygon
+from symsorter.outline.edit_geom import map_icon_local_to_image
 from symsorter.outline.export_labelme import (
     add_turtle_polygon,
     delete_all_turtle_polygons,
     delete_turtle_polygon_at,
     extract_polygons,
     find_turtle_polygon_index_at,
+    is_polygon_locked,
     labelme_path_for_thumb,
     load_labelme_json,
 )
@@ -87,6 +89,7 @@ class GridOutlinePromptFilter(QObject):
     def _map_viewport_to_image(
         self, index, viewport_pos: QPoint, thumb_path: Path
     ) -> tuple[float, float] | None:
+        """Map grid click → full-thumb image pixels (respects center-crop zoom)."""
         icon_rect = self._icon_rect_for_index(index)
         if not icon_rect.contains(viewport_pos):
             return None
@@ -95,11 +98,18 @@ class GridOutlinePromptFilter(QObject):
         pix = QPixmap(str(thumb_path))
         img_w = pix.width() or 224
         img_h = pix.height() or 224
-        lx = viewport_pos.x() - icon_rect.x()
-        ly = viewport_pos.y() - icon_rect.y()
-        ix = max(0.0, min(float(img_w - 1), lx / max(1, icon_rect.width()) * img_w))
-        iy = max(0.0, min(float(img_h - 1), ly / max(1, icon_rect.height()) * img_h))
-        return ix, iy
+        lx = float(viewport_pos.x() - icon_rect.x())
+        ly = float(viewport_pos.y() - icon_rect.y())
+        crop_size = getattr(self.browser, "crop_size", None)
+        return map_icon_local_to_image(
+            lx,
+            ly,
+            icon_w=float(icon_rect.width()),
+            icon_h=float(icon_rect.height()),
+            img_w=float(img_w),
+            img_h=float(img_h),
+            crop_size=crop_size,
+        )
 
     def _ensure_sam(self):
         if self._sam is None:
@@ -167,12 +177,21 @@ class GridOutlinePromptFilter(QObject):
             self.browser.statusBar().showMessage(tip, 4000)
 
     def _delete_at_click(self, thumb_path: Path, x: float, y: float) -> None:
-        idx = find_turtle_polygon_index_at(labelme_path_for_thumb(thumb_path), x, y)
+        json_path = labelme_path_for_thumb(thumb_path)
+        idx = find_turtle_polygon_index_at(json_path, x, y)
         if idx is None:
             if hasattr(self.browser, "statusBar") and self.browser.statusBar():
                 self.browser.statusBar().showMessage("No turtle polygon to delete", 2500)
             return
-        if delete_turtle_polygon_at(labelme_path_for_thumb(thumb_path), idx):
+        polys = extract_polygons(load_labelme_json(json_path))
+        if 0 <= idx < len(polys) and is_polygon_locked(polys[idx]):
+            if hasattr(self.browser, "statusBar") and self.browser.statusBar():
+                self.browser.statusBar().showMessage(
+                    "Polygon is quality-locked — unlock in Outline viewer (K) first",
+                    4000,
+                )
+            return
+        if delete_turtle_polygon_at(json_path, idx):
             if hasattr(self.browser, "refresh_outline_icon"):
                 self.browser.refresh_outline_icon(thumb_path.name)
             if hasattr(self.browser, "statusBar") and self.browser.statusBar():

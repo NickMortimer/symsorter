@@ -50,7 +50,16 @@ def draw_polygons_on_pixmap(
         if len(pts) < 3:
             continue
         selected = selected_index is not None and i == selected_index
-        if selected:
+        flags = shape.get("flags") if isinstance(shape.get("flags"), dict) else {}
+        locked = bool(flags.get("locked")) or str(flags.get("quality") or "").lower() in {
+            "good",
+            "ok",
+            "locked",
+        }
+        if locked:
+            pen = QPen(QColor(80, 220, 90, 240))
+            brush = QColor(80, 220, 90, 45)
+        elif selected:
             pen = QPen(QColor(255, 80, 80, 240))
             brush = QColor(255, 80, 80, 60)
         else:

@@ -9,10 +9,12 @@ from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import (
     QColor,
     QFont,
+    QKeySequence,
     QPainter,
     QPen,
     QPixmap,
     QPolygonF,
+    QShortcut,
     QWheelEvent,
 )
 from PySide6.QtWidgets import (
@@ -40,8 +42,10 @@ from symsorter.outline.edit_geom import (
 )
 from symsorter.outline.export_labelme import (
     extract_polygons,
+    is_polygon_locked,
     labelme_path_for_thumb,
     load_labelme_json,
+    set_polygon_locked,
     set_turtle_polygons,
     simplify_polyline,
 )
@@ -209,8 +213,16 @@ class OutlineCanvas(QWidget):
             return None
         return self._polygons[self._selected].get("points")
 
+    def _selected_is_locked(self) -> bool:
+        if self._selected is None or not (0 <= self._selected < len(self._polygons)):
+            return False
+        return is_polygon_locked(self._polygons[self._selected])
+
     def _set_selected_points(self, pts: list[list[float]]) -> None:
         if self._selected is None or not (0 <= self._selected < len(self._polygons)):
+            return
+        if is_polygon_locked(self._polygons[self._selected]):
+            self.statusMessage.emit("Polygon is locked — press K to unlock before editing.")
             return
         self._polygons[self._selected]["points"] = pts
         self.polygonsChanged.emit()
@@ -252,22 +264,35 @@ class OutlineCanvas(QWidget):
             if len(pts) < 2:
                 continue
             selected = i == self._selected
-            pen = QPen(QColor(255, 80, 80, 240) if selected else QColor(0, 255, 200, 220))
-            pen.setWidthF(2.0 if selected else 1.5)
+            locked = is_polygon_locked(shape)
+            if locked:
+                pen = QPen(QColor(80, 220, 90, 240))
+                brush = QColor(80, 220, 90, 40)
+            elif selected:
+                pen = QPen(QColor(255, 80, 80, 240))
+                brush = QColor(255, 80, 80, 45)
+            else:
+                pen = QPen(QColor(0, 255, 200, 220))
+                brush = QColor(0, 220, 180, 35)
+            pen.setWidthF(2.2 if selected else 1.5)
             painter.setPen(pen)
-            brush = QColor(255, 80, 80, 45) if selected else QColor(0, 220, 180, 35)
             painter.setBrush(brush)
             poly = QPolygonF([self._img_to_widget(float(p[0]), float(p[1])) for p in pts])
             painter.drawPolygon(poly)
 
-            if selected:
-                # Vertex handles
+            if selected and not locked:
                 for p in pts:
                     wp = self._img_to_widget(float(p[0]), float(p[1]))
                     painter.setBrush(QColor(255, 255, 255, 230))
                     painter.setPen(QPen(QColor(220, 40, 40), 1.5))
-                    r = 4.0
-                    painter.drawEllipse(wp, r, r)
+                    painter.drawEllipse(wp, 4.0, 4.0)
+            elif selected and locked:
+                # Locked: square markers (not draggable)
+                for p in pts:
+                    wp = self._img_to_widget(float(p[0]), float(p[1]))
+                    painter.setBrush(QColor(80, 220, 90, 220))
+                    painter.setPen(QPen(QColor(20, 100, 40), 1.2))
+                    painter.drawRect(QRectF(wp.x() - 3, wp.y() - 3, 6, 6))
 
         # Lasso preview
         if self._lasso and len(self._lasso) >= 2:
@@ -345,6 +370,11 @@ class OutlineCanvas(QWidget):
         if self.mode == "delete":
             hit = hit_polygon_index(self._polygons, ix, iy)
             if hit is not None:
+                if is_polygon_locked(self._polygons[hit]):
+                    self.statusMessage.emit(
+                        "Polygon is locked — unlock (K) before deleting."
+                    )
+                    return
                 self._polygons.pop(hit)
                 self._selected = (
                     min(hit, len(self._polygons) - 1) if self._polygons else None
@@ -358,12 +388,18 @@ class OutlineCanvas(QWidget):
             return
 
         if self.mode == "lasso":
+            if self._selected_is_locked():
+                self.statusMessage.emit("Selected polygon is locked — unlock (K) first.")
+                return
             self._drawing_lasso = True
             self._lasso = [(ix, iy)]
             self.update()
             return
 
         if self.mode == "eraser":
+            if self._selected_is_locked():
+                self.statusMessage.emit("Selected polygon is locked — unlock (K) first.")
+                return
             self._erasing = True
             self._erase_at(ix, iy)
             return
@@ -377,7 +413,8 @@ class OutlineCanvas(QWidget):
     def _edit_press(self, ix: float, iy: float) -> None:
         # Prefer vertex on selected poly
         pts = self._selected_points()
-        if pts is not None:
+        locked = self._selected_is_locked()
+        if pts is not None and not locked:
             vi = nearest_vertex(
                 pts, ix, iy, max_dist=self._hit_radius_img(VERTEX_HIT_PX)
             )
@@ -391,7 +428,6 @@ class OutlineCanvas(QWidget):
                 )
                 if edge is not None:
                     after, px, py = edge
-                    # In add_point mode use click location; edit uses projection
                     ax, ay = (ix, iy) if self.mode == "add_point" else (px, py)
                     new_pts = insert_vertex(pts, after, ax, ay)
                     self._set_selected_points(new_pts)
@@ -407,12 +443,15 @@ class OutlineCanvas(QWidget):
         if hit is not None and hit != self._selected:
             self._selected = hit
             self.selectionChanged.emit(hit)
-            self.statusMessage.emit(f"Selected polygon #{hit + 1}")
+            lock_note = " (locked)" if is_polygon_locked(self._polygons[hit]) else ""
+            self.statusMessage.emit(f"Selected polygon #{hit + 1}{lock_note}")
             self.update()
             return
 
-        # add_point with no near-edge: insert at nearest edge regardless of dist
-        # (or append if user clicks freely near selected)
+        if locked and pts is not None:
+            self.statusMessage.emit("Polygon is locked — press K to unlock before editing.")
+            return
+
         if self.mode == "add_point" and pts is not None and len(pts) >= 2:
             edge = nearest_edge(pts, ix, iy, max_dist=1e9)
             if edge is not None:
@@ -657,36 +696,40 @@ class OutlineViewerDialog(QDialog):
 
         nav = QHBoxLayout()
         self.prev_btn = QPushButton("← Prev")
-        self.prev_btn.setShortcut("Left")
         self.prev_btn.clicked.connect(self.show_prev)
         nav.addWidget(self.prev_btn)
 
         self.next_btn = QPushButton("Next →")
-        self.next_btn.setShortcut("Right")
         self.next_btn.clicked.connect(self.show_next)
         nav.addWidget(self.next_btn)
 
-        self.fit_btn = QPushButton("Fit (F)")
-        self.fit_btn.setShortcut("F")
+        self.fit_btn = QPushButton("Fit")
         self.fit_btn.clicked.connect(self._fit_view)
         nav.addWidget(self.fit_btn)
 
+        self.lock_btn = QPushButton("Lock good (K)")
+        self.lock_btn.clicked.connect(self.toggle_lock_selected)
+        nav.addWidget(self.lock_btn)
+
         self.del_btn = QPushButton("Delete selected")
-        self.del_btn.setShortcut("Delete")
         self.del_btn.clicked.connect(self.delete_selected)
         nav.addWidget(self.del_btn)
 
         self.save_btn = QPushButton("Save")
-        self.save_btn.setShortcut("Ctrl+S")
         self.save_btn.clicked.connect(self.save_current)
         nav.addWidget(self.save_btn)
 
+        self.save_next_btn = QPushButton("Save & Next")
+        self.save_next_btn.clicked.connect(self.save_and_next)
+        nav.addWidget(self.save_next_btn)
+
         nav.addStretch()
         close_btn = QPushButton("Close")
-        close_btn.setShortcut("Esc")
         close_btn.clicked.connect(self.accept)
         nav.addWidget(close_btn)
         layout.addLayout(nav)
+
+        self._install_shortcuts()
 
         if not self.entries:
             self.title_label.setText("No images to show")
@@ -694,9 +737,47 @@ class OutlineViewerDialog(QDialog):
             self.prev_btn.setEnabled(False)
             self.next_btn.setEnabled(False)
             self.save_btn.setEnabled(False)
+            self.save_next_btn.setEnabled(False)
+            self.lock_btn.setEnabled(False)
         else:
             self._on_mode_changed()
             self.refresh()
+
+    def _bind_shortcut(self, key: str, slot) -> QShortcut:
+        sc = QShortcut(QKeySequence(key), self)
+        sc.setContext(Qt.WidgetWithChildrenShortcut)
+        sc.activated.connect(slot)
+        return sc
+
+    def _install_shortcuts(self) -> None:
+        """Tool + nav shortcuts work even when the canvas has focus."""
+        # Tools (match grid where possible)
+        self._bind_shortcut("E", lambda: self._select_tool(self.radio_edit))
+        self._bind_shortcut("A", lambda: self._select_tool(self.radio_add))
+        self._bind_shortcut("L", lambda: self._select_tool(self.radio_lasso))
+        self._bind_shortcut("R", lambda: self._select_tool(self.radio_eraser))
+        self._bind_shortcut("P", lambda: self._select_tool(self.radio_point))
+        self._bind_shortcut("B", lambda: self._select_tool(self.radio_box))
+        self._bind_shortcut("D", lambda: self._select_tool(self.radio_delete))
+        self._bind_shortcut("H", lambda: self._select_tool(self.radio_view))
+        # Lock / nav / save
+        self._bind_shortcut("K", self.toggle_lock_selected)
+        self._bind_shortcut("Shift+K", lambda: self.toggle_lock_selected(force_unlock=True))
+        self._bind_shortcut("F", self._fit_view)
+        self._bind_shortcut("Left", self.show_prev)
+        self._bind_shortcut("Right", self.show_next)
+        self._bind_shortcut("Ctrl+S", self.save_current)
+        self._bind_shortcut("Ctrl+Return", self.save_and_next)
+        self._bind_shortcut("Ctrl+Enter", self.save_and_next)
+        self._bind_shortcut("N", self.save_and_next)
+        self._bind_shortcut("Delete", self.delete_selected)
+        self._bind_shortcut("Backspace", self.delete_selected)
+        self._bind_shortcut("Esc", self.accept)
+
+    def _select_tool(self, radio: QRadioButton) -> None:
+        radio.setChecked(True)
+        self._on_mode_changed()
+        self.canvas.setFocus(Qt.ShortcutFocusReason)
 
     def _set_status(self, text: str) -> None:
         self.status_label.setText(text)
@@ -796,16 +877,23 @@ class OutlineViewerDialog(QDialog):
         if not self.entries:
             return
         _, display_name = self._current_paths()
-        sel = (
-            f", selected #{self._selected + 1}"
-            if self._selected is not None
-            else ""
-        )
+        sel = ""
+        if self._selected is not None and 0 <= self._selected < len(self._polygons):
+            lock = " locked" if is_polygon_locked(self._polygons[self._selected]) else ""
+            sel = f", selected #{self._selected + 1}{lock}"
+        n_locked = sum(1 for p in self._polygons if is_polygon_locked(p))
         dirty = " *" if self._dirty else ""
         self.title_label.setText(
             f"{self.index + 1}/{len(self.entries)}  —  {display_name}  "
-            f"({len(self._polygons)} turtle polygon(s){sel}){dirty}"
+            f"({len(self._polygons)} poly, {n_locked} locked{sel}){dirty}"
         )
+        if self._selected is not None and 0 <= self._selected < len(self._polygons):
+            if is_polygon_locked(self._polygons[self._selected]):
+                self.lock_btn.setText("Unlock (K)")
+            else:
+                self.lock_btn.setText("Lock good (K)")
+        else:
+            self.lock_btn.setText("Lock good (K)")
 
     def refresh(self) -> None:
         thumb_path, display_name = self._current_paths()
@@ -901,6 +989,9 @@ class OutlineViewerDialog(QDialog):
             if not self._polygons:
                 return
             self._selected = len(self._polygons) - 1
+        if is_polygon_locked(self._polygons[self._selected]):
+            self.status_label.setText("Polygon is locked — unlock (K) before deleting.")
+            return
         self._polygons.pop(self._selected)
         self._selected = (
             min(self._selected, len(self._polygons) - 1) if self._polygons else None
@@ -912,6 +1003,42 @@ class OutlineViewerDialog(QDialog):
         self.status_label.setText(
             f"Deleted. {len(self._polygons)} polygon(s) left. Save when done."
         )
+
+    def toggle_lock_selected(self, force_unlock: bool = False) -> None:
+        """Mark selected polygon quality-good (locked) so it won't be redone."""
+        if self._selected is None or not self._polygons:
+            if not self._polygons:
+                self.status_label.setText("No polygon to lock.")
+                return
+            self._selected = len(self._polygons) - 1
+        poly = self._polygons[self._selected]
+        if force_unlock or is_polygon_locked(poly):
+            set_polygon_locked(poly, False)
+            self.status_label.setText(
+                f"Unlocked polygon #{self._selected + 1} (editable again)."
+            )
+        else:
+            set_polygon_locked(poly, True)
+            self.status_label.setText(
+                f"Locked polygon #{self._selected + 1} as quality=good. "
+                "Sort grid with Shift+W for remaining work."
+            )
+        self._dirty = True
+        self._push_scene(refit=False)
+        self.canvas.set_selected(self._selected)
+        self._update_title()
+
+    def save_and_next(self) -> None:
+        """Save current outlines, then advance (skips confirming dirty)."""
+        if not self.entries:
+            return
+        if not self.save_current():
+            return
+        if len(self.entries) <= 1:
+            self.status_label.setText("Saved. (Only one image in this session.)")
+            return
+        self.index = (self.index + 1) % len(self.entries)
+        self.refresh()
 
     def save_current(self) -> bool:
         if not self.entries:

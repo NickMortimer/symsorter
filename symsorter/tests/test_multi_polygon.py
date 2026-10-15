@@ -15,10 +15,14 @@ from symsorter.outline.export_labelme import (
     delete_turtle_polygon_at,
     extract_polygons,
     find_turtle_polygon_index_at,
+    is_polygon_locked,
     load_labelme_json,
+    outline_work_status,
     replace_turtle_polygon_at,
+    set_polygon_locked,
     set_turtle_polygons,
     simplify_polyline,
+    thumb_needs_outline_work,
     upsert_turtle_polygon,
 )
 from symsorter.outline.overlay import apply_outline_overlay_if_present, shift_polygons
@@ -194,6 +198,48 @@ def test_shift_polygons_for_crop() -> None:
     polys = [{"label": "turtle", "points": _square(50), "flags": {}}]
     shifted = shift_polygons(polys, dx=40.0, dy=40.0)
     assert shifted[0]["points"][0] == [20.0, 20.0]
+
+
+def test_quality_lock_and_work_status(tmp_path: Path) -> None:
+    thumb = tmp_path / "t.jpg"
+    Image.new("RGB", (224, 224), color=(1, 2, 3)).save(thumb)
+    json_path = thumb.with_suffix(".json")
+    assert outline_work_status(json_path) == "empty"
+    assert thumb_needs_outline_work(thumb) is True
+
+    add_turtle_polygon(
+        json_path,
+        image_path=thumb.name,
+        image_height=224,
+        image_width=224,
+        points=_square(0),
+    )
+    assert outline_work_status(json_path) == "needs_work"
+    polys = extract_polygons(load_labelme_json(json_path))
+    set_polygon_locked(polys[0], True)
+    set_turtle_polygons(
+        json_path,
+        polys,
+        image_path=thumb.name,
+        image_height=224,
+        image_width=224,
+    )
+    loaded = extract_polygons(load_labelme_json(json_path))
+    assert is_polygon_locked(loaded[0]) is True
+    assert loaded[0]["flags"]["quality"] == "good"
+    assert loaded[0]["flags"]["draft"] is False
+    assert outline_work_status(json_path) == "done"
+    assert thumb_needs_outline_work(thumb) is False
+
+    # Second unlocked poly → needs work again
+    add_turtle_polygon(
+        json_path,
+        image_path=thumb.name,
+        image_height=224,
+        image_width=224,
+        points=_square(40),
+    )
+    assert outline_work_status(json_path) == "needs_work"
 
 
 def test_overlay_with_crop_xyxy(tmp_path: Path) -> None:

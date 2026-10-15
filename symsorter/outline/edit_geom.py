@@ -6,6 +6,68 @@ import math
 from typing import Any
 
 
+def center_crop_xyxy(
+    img_w: int | float,
+    img_h: int | float,
+    crop_size: int | float | None,
+) -> tuple[float, float, float, float]:
+    """Return ``(left, top, right, bottom)`` for the browser center-crop view.
+
+    Matches ``ImageLoadWorker``: when ``crop_size`` is unset/≤0, the full image.
+    """
+    img_w = float(img_w)
+    img_h = float(img_h)
+    if crop_size is None or crop_size <= 0:
+        return 0.0, 0.0, img_w, img_h
+    cs = float(crop_size)
+    crop_w = min(cs, img_w)
+    crop_h = min(cs, img_h)
+    left = max(0.0, (img_w - cs) / 2.0)
+    top = max(0.0, (img_h - cs) / 2.0)
+    return left, top, left + crop_w, top + crop_h
+
+
+def map_icon_local_to_image(
+    lx: float,
+    ly: float,
+    *,
+    icon_w: float,
+    icon_h: float,
+    img_w: float,
+    img_h: float,
+    crop_size: int | float | None = None,
+) -> tuple[float, float] | None:
+    """Map a point in the grid icon (0..icon) to full-image pixel coords.
+
+    Accounts for center-crop + KeepAspectRatio letterboxing inside the icon cell.
+    Returns None if the point falls in the letterbox / outside the image.
+    """
+    icon_w = max(1.0, float(icon_w))
+    icon_h = max(1.0, float(icon_h))
+    img_w = max(1.0, float(img_w))
+    img_h = max(1.0, float(img_h))
+    left, top, right, bottom = center_crop_xyxy(img_w, img_h, crop_size)
+    crop_w = max(1.0, right - left)
+    crop_h = max(1.0, bottom - top)
+
+    scale = min(icon_w / crop_w, icon_h / crop_h)
+    disp_w = crop_w * scale
+    disp_h = crop_h * scale
+    off_x = (icon_w - disp_w) / 2.0
+    off_y = (icon_h - disp_h) / 2.0
+
+    if lx < off_x - 0.5 or ly < off_y - 0.5:
+        return None
+    if lx > off_x + disp_w + 0.5 or ly > off_y + disp_h + 0.5:
+        return None
+
+    cx = (lx - off_x) / scale
+    cy = (ly - off_y) / scale
+    ix = max(0.0, min(img_w - 1.0, left + cx))
+    iy = max(0.0, min(img_h - 1.0, top + cy))
+    return ix, iy
+
+
 def point_in_poly(x: float, y: float, pts: list[list[float]]) -> bool:
     """Ray-cast point-in-polygon."""
     inside = False

@@ -593,6 +593,18 @@ class TestMenusRadioGroups:
             def sort_by_class(self):
                 pass
 
+            def sort_by_outline_needs_work(self):
+                pass
+
+            def open_outline_viewer(self):
+                pass
+
+            def toggle_outline_overlays(self, _checked=False):
+                pass
+
+            def set_outline_prompt_mode(self, _mode):
+                pass
+
             def show_classified_images(self):
                 pass
 

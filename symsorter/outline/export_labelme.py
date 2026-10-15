@@ -76,6 +76,8 @@ def extract_polygons(
 def _shape_flags(flags: dict[str, Any] | None) -> dict[str, Any]:
     shape_flags: dict[str, Any] = {
         "draft": True,
+        "locked": False,
+        "quality": None,
         "backend": None,
         "det_index": None,
         "turtle_group_id": None,
@@ -85,6 +87,51 @@ def _shape_flags(flags: dict[str, Any] | None) -> dict[str, Any]:
     if flags:
         shape_flags.update(flags)
     return shape_flags
+
+
+def is_polygon_locked(poly: dict[str, Any]) -> bool:
+    """True when a shape is quality-locked (skip redo)."""
+    flags = poly.get("flags") if isinstance(poly, dict) else None
+    if not isinstance(flags, dict):
+        return False
+    if flags.get("locked") is True:
+        return True
+    return str(flags.get("quality") or "").lower() in {"good", "ok", "locked"}
+
+
+def set_polygon_locked(poly: dict[str, Any], locked: bool = True) -> dict[str, Any]:
+    """Mutate polygon flags for quality lock / unlock. Returns the polygon."""
+    flags = dict(poly.get("flags") or {})
+    flags["locked"] = bool(locked)
+    if locked:
+        flags["quality"] = "good"
+        flags["draft"] = False
+    else:
+        flags["quality"] = None
+        flags["draft"] = True
+    poly["flags"] = flags
+    return poly
+
+
+def outline_work_status(path: Path, *, label: str = "turtle") -> str:
+    """``empty`` | ``needs_work`` | ``done`` for a thumb's sibling LabelMe JSON.
+
+    - ``empty``: no turtle polygons (needs work)
+    - ``needs_work``: at least one unlocked turtle polygon
+    - ``done``: ≥1 turtle polygon and all are locked
+    """
+    polys = extract_polygons(load_labelme_json(path), label=label)
+    if not polys:
+        return "empty"
+    if all(is_polygon_locked(p) for p in polys):
+        return "done"
+    return "needs_work"
+
+
+def thumb_needs_outline_work(thumb_path: Path) -> bool:
+    """True when the thumb has no outline or any unlocked turtle polygon."""
+    status = outline_work_status(labelme_path_for_thumb(thumb_path))
+    return status != "done"
 
 
 def _blank_doc(

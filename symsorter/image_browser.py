@@ -438,6 +438,41 @@ class ImageBrowser(QMainWindow,
             self.enable_class_group_wrapping(False)
         self.rebuild_model_after_sort()
 
+    def sort_by_outline_needs_work(self):
+        """Sort: unlocked/empty outlines first, quality-locked (done) last."""
+        if not self.image_files:
+            return
+        from pathlib import Path
+
+        from symsorter.outline.export_labelme import (
+            labelme_path_for_thumb,
+            outline_work_status,
+        )
+
+        folder = Path(getattr(self, "folder", "") or "")
+
+        def key_fn(fn):
+            status = outline_work_status(labelme_path_for_thumb(folder / fn))
+            # empty & needs_work first (0), done last (1)
+            bucket = 0 if status != "done" else 1
+            return (bucket, status, fn)
+
+        self.image_files.sort(key=key_fn)
+        self.current_sort_mode = "outline_needs_work"
+        if hasattr(self, "enable_class_group_wrapping"):
+            self.enable_class_group_wrapping(False)
+        self.rebuild_model_after_sort()
+        n_todo = sum(
+            1
+            for fn in self.image_files
+            if outline_work_status(labelme_path_for_thumb(folder / fn)) != "done"
+        )
+        if hasattr(self, "statusBar") and self.statusBar():
+            self.statusBar().showMessage(
+                f"Sorted by outline needs-work — {n_todo} still need review",
+                5000,
+            )
+
     def on_double_click(self, index: QModelIndex):
         """Global similarity sort, then restrict to current filter for the view."""
         if not index.isValid() or not getattr(self, "embeddings", None):
