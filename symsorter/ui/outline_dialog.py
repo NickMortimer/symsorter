@@ -39,6 +39,7 @@ from symsorter.outline.edit_geom import (
     nearest_edge,
     nearest_vertex,
     next_index,
+    remove_vertex,
     zoom_at_pointer,
 )
 from symsorter.outline.export_labelme import (
@@ -617,6 +618,42 @@ class OutlineCanvas(QWidget):
             pass
         super().keyPressEvent(event)
 
+    def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
+        """Double-click a vertex in edit mode to delete it (keeps ≥3)."""
+        if event.button() != Qt.LeftButton or self.mode != "edit":
+            return super().mouseDoubleClickEvent(event)
+
+        self._drag_vertex = None
+        if self._selected_is_locked():
+            self.statusMessage.emit(
+                "Polygon is locked — press K to unlock before editing."
+            )
+            return
+
+        pts = self._selected_points()
+        if pts is None:
+            return super().mouseDoubleClickEvent(event)
+
+        ix, iy = self._widget_to_img(event.position().toPoint())
+        vi = nearest_vertex(
+            pts, ix, iy, max_dist=self._hit_radius_img(VERTEX_HIT_PX)
+        )
+        if vi is None:
+            return super().mouseDoubleClickEvent(event)
+
+        new_pts, removed = remove_vertex(pts, vi, min_keep=MIN_VERTICES)
+        if not removed:
+            self.statusMessage.emit(
+                f"Need ≥{MIN_VERTICES} vertices — can't delete this point."
+            )
+            return
+
+        self._set_selected_points(new_pts)
+        self.statusMessage.emit(
+            f"Deleted vertex; {len(new_pts)} left. Save when done."
+        )
+        self.update()
+
 
 class OutlineViewerDialog(QDialog):
     """Multi-polygon outline editor for selected thumbs."""
@@ -797,7 +834,8 @@ class OutlineViewerDialog(QDialog):
         tips = {
             self.radio_edit: (
                 "edit",
-                "Drag vertices · click edge to insert · Alt/right-drag pan · wheel zoom",
+                "Drag vertices · double-click point to delete · click edge to insert · "
+                "Alt/right-drag pan · wheel zoom",
             ),
             self.radio_add: (
                 "add_point",
@@ -1072,28 +1110,34 @@ class OutlineViewerDialog(QDialog):
             )
 
     def toggle_lock_selected(self, force_unlock: bool = False) -> None:
-        """Mark selected polygon quality-good (locked) so it won't be redone."""
+        """Mark selected polygon quality-good (locked) and auto-save LabelMe JSON."""
         if self._selected is None or not self._polygons:
             if not self._polygons:
                 self.status_label.setText("No polygon to lock.")
                 return
             self._selected = len(self._polygons) - 1
         poly = self._polygons[self._selected]
-        if force_unlock or is_polygon_locked(poly):
-            set_polygon_locked(poly, False)
-            self.status_label.setText(
-                f"Unlocked polygon #{self._selected + 1} (editable again)."
+        locking = not (force_unlock or is_polygon_locked(poly))
+        if locking:
+            set_polygon_locked(poly, True)
+            note = (
+                f"Locked polygon #{self._selected + 1} as quality=good "
+                "(auto-saved). Sort grid with Shift+W for remaining work."
             )
         else:
-            set_polygon_locked(poly, True)
-            self.status_label.setText(
-                f"Locked polygon #{self._selected + 1} as quality=good. "
-                "Sort grid with Shift+W for remaining work."
+            set_polygon_locked(poly, False)
+            note = (
+                f"Unlocked polygon #{self._selected + 1} "
+                "(editable again, auto-saved)."
             )
         self._dirty = True
         self._push_scene(refit=False)
         self.canvas.set_selected(self._selected)
         self._update_title()
+        if self.save_current():
+            self.status_label.setText(note)
+        else:
+            self.status_label.setText(note + " Save failed.")
 
     def _advance_index(self, *, skip_done: bool = True) -> bool:
         """Move ``self.index`` forward. Prefer unlocked/empty thumbs when skipping."""

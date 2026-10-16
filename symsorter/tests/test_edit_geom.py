@@ -14,6 +14,7 @@ from symsorter.outline.edit_geom import (
     next_index,
     padded_bbox,
     polygons_bbox,
+    remove_vertex,
     zoom_at_pointer,
 )
 
@@ -102,6 +103,16 @@ def test_eraser_removes_nearby() -> None:
     assert n == 1
     assert [50.0, 0.0] not in kept
     assert len(kept) == 4
+
+
+def test_remove_vertex_keeps_min() -> None:
+    pts = [[0.0, 0.0], [50.0, 0.0], [100.0, 0.0], [100.0, 100.0]]
+    kept, ok = remove_vertex(pts, 1, min_keep=3)
+    assert ok is True
+    assert kept == [[0.0, 0.0], [100.0, 0.0], [100.0, 100.0]]
+    kept2, ok2 = remove_vertex(kept, 0, min_keep=3)
+    assert ok2 is False
+    assert kept2 == kept
 
 
 def test_next_index_skips_done() -> None:

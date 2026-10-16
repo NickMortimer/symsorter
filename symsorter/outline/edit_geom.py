@@ -279,6 +279,23 @@ def delete_points_inside(
     return kept, removed
 
 
+def remove_vertex(
+    pts: list[list[float]],
+    index: int,
+    *,
+    min_keep: int = 3,
+) -> tuple[list[list[float]], bool]:
+    """Drop vertex at ``index`` if that leaves at least ``min_keep`` points.
+
+    Returns ``(points, removed)``.
+    """
+    if len(pts) <= min_keep or not (0 <= index < len(pts)):
+        return [list(p) for p in pts], False
+    out = [list(p) for p in pts]
+    out.pop(index)
+    return out, True
+
+
 def erase_points_near(
     pts: list[list[float]],
     x: float,
