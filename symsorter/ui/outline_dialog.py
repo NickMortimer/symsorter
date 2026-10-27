@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
 
 from symsorter.outline.backends import DEFAULT_THUMB_SIZE, load_sam_model, sam_polygon
 from symsorter.outline.edit_geom import (
+    append_lasso_click,
     delete_points_inside,
     erase_points_near,
     fit_view,
@@ -62,6 +63,8 @@ MIN_VERTICES = 3
 VERTEX_HIT_PX = 10.0
 EDGE_HIT_PX = 8.0
 ERASER_RADIUS_PX = 14.0
+LASSO_DRAG_THRESH_PX = 6.0  # widget px: below = click, above = freehand
+LASSO_CLOSE_HIT_PX = 12.0  # widget px: click near start closes click-lasso
 
 
 def render_thumb_with_polygons(
@@ -129,7 +132,9 @@ class OutlineCanvas(QWidget):
         self._box_origin: QPoint | None = None
         self._box_current: QPoint | None = None
         self._lasso: list[tuple[float, float]] = []
-        self._drawing_lasso = False
+        self._drawing_lasso = False  # freehand drag in progress
+        self._lasso_press_widget: QPoint | None = None
+        self._lasso_press_img: tuple[float, float] | None = None
         self._panning = False
         self._pan_last: QPoint | None = None
         self._erasing = False
@@ -235,11 +240,16 @@ class OutlineCanvas(QWidget):
         self._drag_vertex = None
         self._box_origin = None
         self._box_current = None
-        self._lasso = []
-        self._drawing_lasso = False
+        self._clear_lasso_state()
         self._panning = False
         self._pan_last = None
         self._erasing = False
+
+    def _clear_lasso_state(self) -> None:
+        self._lasso = []
+        self._drawing_lasso = False
+        self._lasso_press_widget = None
+        self._lasso_press_img = None
 
     # ----- painting -----
 
@@ -298,14 +308,27 @@ class OutlineCanvas(QWidget):
                     painter.setPen(QPen(QColor(20, 100, 40), 1.2))
                     painter.drawRect(QRectF(wp.x() - 3, wp.y() - 3, 6, 6))
 
-        # Lasso preview
-        if self._lasso and len(self._lasso) >= 2:
+        # Lasso preview (freehand or click-to-place)
+        if self._lasso:
+            pts_w = [self._img_to_widget(x, y) for x, y in self._lasso]
             painter.setPen(QPen(QColor(255, 220, 0), 2))
             painter.setBrush(QColor(255, 220, 0, 40))
-            poly = QPolygonF(
-                [self._img_to_widget(x, y) for x, y in self._lasso]
-            )
-            painter.drawPolyline(poly)
+            if len(pts_w) >= 2:
+                painter.drawPolyline(QPolygonF(pts_w))
+            # Rubber-band to hover while placing clicks (not mid-freehand)
+            if (
+                not self._drawing_lasso
+                and self._hover is not None
+                and self.mode == "lasso"
+            ):
+                painter.setPen(QPen(QColor(255, 220, 0, 160), 1, Qt.DashLine))
+                painter.drawLine(pts_w[-1], QPointF(self._hover))
+            # Vertex dots; emphasize start (close target)
+            for i, wp in enumerate(pts_w):
+                r = 5.0 if i == 0 else 3.5
+                painter.setBrush(QColor(255, 240, 80, 230))
+                painter.setPen(QPen(QColor(180, 120, 0), 1.2))
+                painter.drawEllipse(wp, r, r)
 
         # SAM box preview
         if self._box_origin is not None and self._box_current is not None:
@@ -395,8 +418,10 @@ class OutlineCanvas(QWidget):
             if self._selected_is_locked():
                 self.statusMessage.emit("Selected polygon is locked — unlock (K) first.")
                 return
-            self._drawing_lasso = True
-            self._lasso = [(ix, iy)]
+            # Defer click vs freehand until move/release (threshold).
+            self._lasso_press_widget = pos
+            self._lasso_press_img = (ix, iy)
+            self._drawing_lasso = False
             self.update()
             return
 
@@ -436,9 +461,14 @@ class OutlineCanvas(QWidget):
                     new_pts = insert_vertex(pts, after, ax, ay)
                     self._set_selected_points(new_pts)
                     self._drag_vertex = after + 1 if self.mode == "edit" else None
-                    self.statusMessage.emit(
-                        f"Added vertex (now {len(new_pts)}). Save when done."
-                    )
+                    if self.mode == "edit":
+                        self.statusMessage.emit(
+                            f"Inserted vertex (now {len(new_pts)}) — drag to place."
+                        )
+                    else:
+                        self.statusMessage.emit(
+                            f"Added vertex (now {len(new_pts)}). Save when done."
+                        )
                     self.update()
                     return
 
@@ -495,6 +525,14 @@ class OutlineCanvas(QWidget):
         self._hover = pos
         if self.mode == "eraser" and not self._erasing and not self._panning:
             self.update()
+        elif (
+            self.mode == "lasso"
+            and self._lasso
+            and not self._drawing_lasso
+            and self._lasso_press_widget is None
+            and not self._panning
+        ):
+            self.update()  # rubber-band to cursor
 
         if self._panning and self._pan_last is not None:
             dx = pos.x() - self._pan_last.x()
@@ -510,10 +548,23 @@ class OutlineCanvas(QWidget):
             self.update()
             return
 
-        if self.mode == "lasso" and self._drawing_lasso:
-            ix, iy = self._widget_to_img(pos)
-            self._lasso.append((ix, iy))
-            self.update()
+        if self.mode == "lasso" and (
+            self._drawing_lasso or self._lasso_press_widget is not None
+        ):
+            if self._lasso_press_widget is not None and not self._drawing_lasso:
+                dx = pos.x() - self._lasso_press_widget.x()
+                dy = pos.y() - self._lasso_press_widget.y()
+                if (dx * dx + dy * dy) ** 0.5 >= LASSO_DRAG_THRESH_PX:
+                    # Promote to freehand; keep any prior click vertices.
+                    press = self._lasso_press_img
+                    if press is not None:
+                        if not self._lasso or self._lasso[-1] != press:
+                            self._lasso.append(press)
+                    self._drawing_lasso = True
+            if self._drawing_lasso:
+                ix, iy = self._widget_to_img(pos)
+                self._lasso.append((ix, iy))
+                self.update()
             return
 
         if self.mode == "eraser" and self._erasing:
@@ -570,17 +621,89 @@ class OutlineCanvas(QWidget):
                 self.boxSeeded.emit(x1, y1, x2, y2)
             return
 
-        if self.mode == "lasso" and self._drawing_lasso:
-            self._drawing_lasso = False
-            raw = [[float(x), float(y)] for x, y in self._lasso]
-            self._lasso = []
-            self.update()
-            if len(raw) >= 3:
-                lasso = simplify_polyline(raw, max_points=96)
-                self._apply_lasso_delete(lasso)
+        if self.mode == "lasso" and (
+            self._drawing_lasso or self._lasso_press_img is not None
+        ):
+            if self._drawing_lasso:
+                # Freehand stroke finished on release.
+                self._drawing_lasso = False
+                self._lasso_press_widget = None
+                self._lasso_press_img = None
+                raw = list(self._lasso)
+                self._lasso = []
+                self.update()
+                if len(raw) >= MIN_VERTICES:
+                    lasso = simplify_polyline(
+                        [[float(x), float(y)] for x, y in raw], max_points=96
+                    )
+                    if len(lasso) < MIN_VERTICES:
+                        lasso = [[float(x), float(y)] for x, y in raw]
+                    self._apply_lasso_delete(lasso)
+                else:
+                    self.statusMessage.emit(
+                        "Freehand lasso needs ≥3 points (drag further)."
+                    )
+                return
+
+            # Click (no drag past threshold): place a vertex or close.
+            press = self._lasso_press_img
+            self._lasso_press_widget = None
+            self._lasso_press_img = None
+            if press is None:
+                return
+            close_dist = self._hit_radius_img(LASSO_CLOSE_HIT_PX)
+            self._lasso, action = append_lasso_click(
+                self._lasso,
+                press[0],
+                press[1],
+                close_dist=close_dist,
+                min_points=MIN_VERTICES,
+            )
+            if action == "closed":
+                self._finish_click_lasso()
+            elif action == "appended":
+                n = len(self._lasso)
+                self.statusMessage.emit(
+                    f"Lasso point {n} — click more, click start, or Enter to finish "
+                    f"(need ≥{MIN_VERTICES})."
+                )
+                self.update()
             return
 
         super().mouseReleaseEvent(event)
+
+    def _finish_click_lasso(self) -> bool:
+        """Commit the multi-click lasso if it has ≥3 points. Returns True if handled."""
+        if self.mode != "lasso":
+            return False
+        if len(self._lasso) < MIN_VERTICES:
+            if self._lasso:
+                self.statusMessage.emit(
+                    f"Need ≥{MIN_VERTICES} lasso points "
+                    f"({len(self._lasso)} so far). Click start or Enter when ready."
+                )
+                return True
+            return False
+        raw = [[float(x), float(y)] for x, y in self._lasso]
+        self._clear_lasso_state()
+        self.update()
+        self._apply_lasso_delete(raw)
+        return True
+
+    def cancel_lasso_if_any(self) -> bool:
+        """Clear an in-progress lasso. Returns True if there was one."""
+        if self.mode != "lasso":
+            return False
+        if not (
+            self._lasso
+            or self._drawing_lasso
+            or self._lasso_press_img is not None
+        ):
+            return False
+        self._clear_lasso_state()
+        self.statusMessage.emit("Lasso cancelled.")
+        self.update()
+        return True
 
     def _apply_lasso_delete(self, lasso: list[list[float]]) -> None:
         pts = self._selected_points()
@@ -612,15 +735,40 @@ class OutlineCanvas(QWidget):
             self.fit_to_polygons()
             self.statusMessage.emit("Fit view to polygons (+10%).")
             return
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter) and self.mode == "lasso":
+            self._finish_click_lasso()
+            return
+        if event.key() == Qt.Key_Escape and self.cancel_lasso_if_any():
+            return
         if event.key() in (Qt.Key_Delete, Qt.Key_Backspace) and self.mode == "edit":
-            # Delete nearest vertex to… we don't track hover; delete last selected drag — skip
-            # Or delete whole poly via dialog button
+            # Delete nearest vertex via double-click; whole poly via Del poly / Delete
             pass
+        if (
+            event.key() == Qt.Key_Backspace
+            and self.mode == "lasso"
+            and self._lasso
+            and not self._drawing_lasso
+        ):
+            self._lasso.pop()
+            self.statusMessage.emit(
+                f"Removed last lasso point ({len(self._lasso)} left)."
+            )
+            self.update()
+            return
         super().keyPressEvent(event)
 
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
-        """Double-click a vertex in edit mode to delete it (keeps ≥3)."""
-        if event.button() != Qt.LeftButton or self.mode != "edit":
+        """Edit: double-click vertex deletes it. Lasso: double-click finishes (≥3)."""
+        if event.button() != Qt.LeftButton:
+            return super().mouseDoubleClickEvent(event)
+        if self.mode == "lasso":
+            # Consume the second click's press residue, then finish if possible.
+            self._lasso_press_widget = None
+            self._lasso_press_img = None
+            if self._finish_click_lasso():
+                return
+            return super().mouseDoubleClickEvent(event)
+        if self.mode != "edit":
             return super().mouseDoubleClickEvent(event)
 
         self._drag_vertex = None
@@ -820,7 +968,19 @@ class OutlineViewerDialog(QDialog):
         self._bind_shortcut("N", self.save_and_next)
         self._bind_shortcut("Delete", self.delete_selected)
         self._bind_shortcut("Backspace", self.delete_selected)
-        self._bind_shortcut("Esc", self.accept)
+        self._bind_shortcut("Return", self._enter_or_finish_lasso)
+        self._bind_shortcut("Enter", self._enter_or_finish_lasso)
+        self._bind_shortcut("Esc", self._escape_or_close)
+
+    def _enter_or_finish_lasso(self) -> None:
+        """Enter finishes a click-lasso; otherwise ignored (Ctrl+Enter is Save&Next)."""
+        if self.canvas.mode == "lasso" and self.canvas._finish_click_lasso():
+            return
+
+    def _escape_or_close(self) -> None:
+        if self.canvas.cancel_lasso_if_any():
+            return
+        self.accept()
 
     def _select_tool(self, radio: QRadioButton) -> None:
         radio.setChecked(True)
@@ -834,8 +994,8 @@ class OutlineViewerDialog(QDialog):
         tips = {
             self.radio_edit: (
                 "edit",
-                "Drag vertices · double-click point to delete · click edge to insert · "
-                "Alt/right-drag pan · wheel zoom",
+                "Click vertex to drag · click edge to insert (+drag) · "
+                "double-click vertex to delete · Alt/right-drag pan · wheel zoom",
             ),
             self.radio_add: (
                 "add_point",
@@ -843,7 +1003,8 @@ class OutlineViewerDialog(QDialog):
             ),
             self.radio_lasso: (
                 "lasso",
-                "Draw a freehand lasso — vertices INSIDE are deleted (keeps ≥3).",
+                "Drag freehand OR click vertices; click start / Enter to finish. "
+                "Deletes verts INSIDE (keeps ≥3). Esc cancels.",
             ),
             self.radio_eraser: (
                 "eraser",

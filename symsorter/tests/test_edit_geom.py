@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from symsorter.outline.edit_geom import (
+    append_lasso_click,
     center_crop_xyxy,
     delete_points_inside,
     erase_points_near,
@@ -113,6 +114,39 @@ def test_remove_vertex_keeps_min() -> None:
     kept2, ok2 = remove_vertex(kept, 0, min_keep=3)
     assert ok2 is False
     assert kept2 == kept
+
+
+def test_insert_on_edge_index_for_drag() -> None:
+    """Click-edge insert places the new vertex at after+1 (edit mode drags it)."""
+    pts = [[0.0, 0.0], [100.0, 0.0], [100.0, 100.0], [0.0, 100.0]]
+    edge = nearest_edge(pts, 50.0, 1.0, max_dist=10.0)
+    assert edge is not None
+    after, px, py = edge
+    new = insert_vertex(pts, after, px, py)
+    assert len(new) == 5
+    drag_index = after + 1
+    assert new[drag_index] == [px, py]
+
+
+def test_append_lasso_click_closes_near_start() -> None:
+    pts: list[tuple[float, float]] = []
+    pts, a1 = append_lasso_click(pts, 0.0, 0.0, close_dist=5.0)
+    assert a1 == "appended"
+    pts, a2 = append_lasso_click(pts, 40.0, 0.0, close_dist=5.0)
+    assert a2 == "appended"
+    pts, a3 = append_lasso_click(pts, 40.0, 40.0, close_dist=5.0)
+    assert a3 == "appended"
+    assert len(pts) == 3
+    # Near start → close (do not append)
+    pts2, action = append_lasso_click(pts, 1.0, 1.0, close_dist=5.0, min_points=3)
+    assert action == "closed"
+    assert pts2 == pts
+    # Too few points: near start still appends
+    few, action_few = append_lasso_click(
+        [(0.0, 0.0), (10.0, 0.0)], 0.5, 0.5, close_dist=5.0, min_points=3
+    )
+    assert action_few == "appended"
+    assert len(few) == 3
 
 
 def test_next_index_skips_done() -> None:

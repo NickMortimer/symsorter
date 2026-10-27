@@ -257,6 +257,43 @@ def insert_vertex(
     return out
 
 
+def points_within(
+    x0: float, y0: float, x1: float, y1: float, *, max_dist: float
+) -> bool:
+    """True when (x0,y0) is within ``max_dist`` of (x1,y1)."""
+    return math.hypot(float(x0) - float(x1), float(y0) - float(y1)) <= max_dist
+
+
+def append_lasso_click(
+    pts: list[tuple[float, float]] | list[list[float]],
+    x: float,
+    y: float,
+    *,
+    close_dist: float,
+    min_points: int = 3,
+) -> tuple[list[tuple[float, float]], str]:
+    """Add a click-lasso vertex, or close when near the start point.
+
+    Returns ``(points, action)`` where ``action`` is:
+    - ``\"closed\"`` — click is near the first vertex and ``len(pts) >= min_points``
+      (points unchanged; caller should finalize)
+    - ``\"appended\"`` — vertex added
+    - ``\"ignored\"`` — duplicate of the last vertex
+    """
+    out: list[tuple[float, float]] = [
+        (float(p[0]), float(p[1])) for p in pts
+    ]
+    if (
+        len(out) >= min_points
+        and points_within(x, y, out[0][0], out[0][1], max_dist=close_dist)
+    ):
+        return out, "closed"
+    if out and points_within(x, y, out[-1][0], out[-1][1], max_dist=1e-6):
+        return out, "ignored"
+    out.append((float(x), float(y)))
+    return out, "appended"
+
+
 def delete_points_inside(
     pts: list[list[float]],
     lasso: list[list[float]],

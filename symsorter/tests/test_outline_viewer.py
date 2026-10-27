@@ -168,3 +168,117 @@ def test_canvas_double_click_removes_vertex(tmp_path: Path) -> None:
     )
     canvas.mouseDoubleClickEvent(event)
     assert len(canvas._polygons[0]["points"]) == 4
+
+
+def test_edit_click_edge_inserts_and_arms_drag(tmp_path: Path) -> None:
+    _ensure_qapp()
+    from PySide6.QtGui import QPixmap
+
+    from symsorter.ui.outline_dialog import OutlineCanvas
+
+    thumb = tmp_path / "t.jpg"
+    Image.new("RGB", (224, 224), color=(1, 2, 3)).save(thumb)
+    canvas = OutlineCanvas()
+    canvas.resize(400, 400)
+    canvas.show()
+    canvas.set_mode("edit")
+    polys = [
+        {
+            "label": "turtle",
+            "points": [[40.0, 40.0], [180.0, 40.0], [180.0, 180.0], [40.0, 180.0]],
+            "flags": {},
+        }
+    ]
+    canvas.set_scene(
+        QPixmap(str(thumb)),
+        polys,
+        selected_index=0,
+        image_width=224,
+        image_height=224,
+        refit=True,
+    )
+    assert len(canvas._polygons[0]["points"]) == 4
+    # Midpoint of top edge
+    canvas._edit_press(110.0, 40.0)
+    assert len(canvas._polygons[0]["points"]) == 5
+    assert canvas._drag_vertex == 1
+    assert abs(canvas._polygons[0]["points"][1][0] - 110.0) < 2.0
+
+
+def test_click_lasso_finish_on_start_and_enter(tmp_path: Path) -> None:
+    _ensure_qapp()
+    from PySide6.QtGui import QPixmap
+
+    from symsorter.ui.outline_dialog import OutlineCanvas
+
+    thumb = tmp_path / "t.jpg"
+    Image.new("RGB", (224, 224), color=(5, 6, 7)).save(thumb)
+    canvas = OutlineCanvas()
+    canvas.resize(400, 400)
+    canvas.set_mode("lasso")
+    # Square with an extra vertex inside that the lasso will remove
+    polys = [
+        {
+            "label": "turtle",
+            "points": [
+                [10.0, 10.0],
+                [200.0, 10.0],
+                [200.0, 200.0],
+                [100.0, 100.0],  # inside lasso
+                [10.0, 200.0],
+            ],
+            "flags": {},
+        }
+    ]
+    canvas.set_scene(
+        QPixmap(str(thumb)),
+        polys,
+        selected_index=0,
+        image_width=224,
+        image_height=224,
+        refit=True,
+    )
+
+    # Simulate three click placements (press+release without drag)
+    from PySide6.QtCore import QPoint
+
+    def click_img(ix: float, iy: float) -> None:
+        wx = int(ix * canvas._zoom + canvas._ox)
+        wy = int(iy * canvas._zoom + canvas._oy)
+        canvas._lasso_press_widget = QPoint(wx, wy)
+        canvas._lasso_press_img = (ix, iy)
+        canvas._drawing_lasso = False
+        # Fake a left-button release path
+        class _E:
+            def button(self):
+                from PySide6.QtCore import Qt
+
+                return Qt.LeftButton
+
+        canvas.mouseReleaseEvent(_E())
+
+    click_img(60.0, 60.0)
+    click_img(140.0, 60.0)
+    click_img(140.0, 140.0)
+    assert len(canvas._lasso) == 3
+
+    # Close by clicking near start
+    click_img(61.0, 61.0)
+    assert canvas._lasso == []
+    pts = canvas._polygons[0]["points"]
+    assert [100.0, 100.0] not in pts
+    assert len(pts) == 4
+
+    # Rebuild and finish with Enter API
+    canvas.set_mode("lasso")
+    canvas._polygons[0]["points"] = [
+        [10.0, 10.0],
+        [200.0, 10.0],
+        [200.0, 200.0],
+        [100.0, 100.0],
+        [10.0, 200.0],
+    ]
+    canvas._lasso = [(60.0, 60.0), (140.0, 60.0), (140.0, 140.0), (60.0, 140.0)]
+    assert canvas._finish_click_lasso() is True
+    assert canvas._lasso == []
+    assert [100.0, 100.0] not in canvas._polygons[0]["points"]
