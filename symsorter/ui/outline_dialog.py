@@ -288,6 +288,9 @@ class OutlineCanvas(QWidget):
             else:
                 pen = QPen(QColor(0, 255, 200, 220))
                 brush = QColor(0, 220, 180, 35)
+            # Edit mode: outline only so the animal edge stays visible under vertices
+            if self.mode in {"edit", "add_point"}:
+                brush = Qt.NoBrush
             pen.setWidthF(2.2 if selected else 1.5)
             painter.setPen(pen)
             painter.setBrush(brush)
@@ -995,11 +998,13 @@ class OutlineViewerDialog(QDialog):
             self.radio_edit: (
                 "edit",
                 "Click vertex to drag · click edge to insert (+drag) · "
-                "double-click vertex to delete · Alt/right-drag pan · wheel zoom",
+                "double-click vertex to delete · fill off for clarity · "
+                "Alt/right-drag pan · wheel zoom",
             ),
             self.radio_add: (
                 "add_point",
-                "Click near an edge (or anywhere on selected poly) to insert a vertex.",
+                "Click near an edge (or anywhere on selected poly) to insert a vertex. "
+                "Fill off while editing.",
             ),
             self.radio_lasso: (
                 "lasso",
