@@ -17,7 +17,7 @@ A CLIP/DINO-based image classification and dataset curation tool with a fast des
 - Write SymSorter class decisions back into source annotation JSON
 - Merge many `classifications.json` files into one COCO JSON
 - Sort and shard classified images into train-ready folder layouts
-- Draft turtle outline polygons on sorted 224×224 thumbs (`outline-draft`)
+- Draft and refine turtle outline polygons on sorted 224×224 thumbs (`outline-draft`, Outline viewer)
 
 ## Installation
 
