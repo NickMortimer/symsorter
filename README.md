@@ -17,6 +17,7 @@ A CLIP/DINO-based image classification and dataset curation tool with a fast des
 - Write SymSorter class decisions back into source annotation JSON
 - Merge many `classifications.json` files into one COCO JSON
 - Sort and shard classified images into train-ready folder layouts
+- Draft and refine turtle outline polygons on sorted 224×224 thumbs (`outline-draft`, Outline viewer)
 
 ## Installation
 
@@ -24,10 +25,15 @@ A CLIP/DINO-based image classification and dataset curation tool with a fast des
 git clone https://github.com/NickMortimer/symsorter.git
 cd symsorter
 
+# Outline / SAM work lives on this branch until merged:
+git checkout cursor/outline-draft-mvp-8c57
+
 python -m venv .venv
 source .venv/bin/activate
 
 pip install -e .
+# Optional: Ultralytics SAM for outline-draft / in-viewer SAM
+pip install -e ".[sam]"
 ```
 
 Verify:
@@ -138,23 +144,117 @@ Available commands:
   - Merge all nested `classifications.json` files into one COCO JSON.
   - Options: `--out`, `--exclude-hidden`
 
+- `outline-draft` / `outline-import-boxes` — see [Outline mode](#outline-mode-turtle-polygons) below.
+
+- `remap-npz`
+  - Rebuild per-shard NPZs under `sorted/` by joining original crop embeddings on filename (no re-encode).
+  - Options: `--thumbs`, `--source`, `--npz-name`, `--classes`, `--overwrite`, `--dry-run`, `--limit-shards`
+  - Example:
+    ```bash
+    symsorter remap-npz \
+      --thumbs /Volumes/turtle_apfs/sorted \
+      --source /Volumes/turtle_apfs/turtle_v01_run02 \
+      --npz-name encoding_dinov3_224.npz \
+      --overwrite
+    ```
+
+## Outline mode (turtle polygons)
+
+Thumb-native LabelMe polygons on sorted **224×224** crops (`foo.jpg` → sibling `foo.json`). No `yolo_finds` mount required for day-to-day editing.
+
+### Setup
+
+```bash
+git checkout cursor/outline-draft-mvp-8c57
+source .venv/bin/activate
+pip install -e ".[sam]"   # needed for SAM draft / in-viewer SAM
+```
+
+### Launch GUI on a sorted shard
+
+```bash
+symsorter gui --embeddings-file /path/to/sorted/turtle-surface/shard_00001/encoding_….npz
+# or open a folder / NPZ from the GUI (Ctrl+O)
+```
+
+Optional: `Shift+W` sorts the grid by outline **needs-work** (unlocked/empty first, locked last). `Shift+O` toggles outline overlays on thumbs.
+
+### Outline viewer (`O`)
+
+Select a thumb (or several) and press **`O`** (or the Outline menu). The viewer edits polygons in thumb pixel space.
+
+| Tool | Key | What it does |
+|------|-----|----------------|
+| **Edit** | `E` | Click a **vertex** to drag · click an **edge** to insert a vertex (then drag) · **double-click** a vertex to delete (keeps ≥3). **No colored fill** while editing so the shell edge stays visible. |
+| Add point | `A` | Click near an edge (or on the poly) to insert a vertex. Fill also off. |
+| **Lasso (−pts)** | `L` | Remove vertices **inside** a region (keeps ≥3). **Drag** freehand *or* **click** vertices one-by-one. Finish click-lasso by clicking near the **start** point or pressing **Enter**. **Esc** cancels an in-progress lasso; Backspace drops the last click point. |
+| Eraser | `R` | Brush-erase nearby vertices. |
+| SAM + / box | `P` / `B` | Add a new turtle polygon from a point or box prompt. |
+| Del poly | `D` | Click a whole polygon to delete it. |
+| Pan | `H` | Drag to pan; wheel zooms at pointer; `F` fits (+10% pad). Alt/right-drag also pans. |
+
+**Lock & save**
+
+- **`K`** — lock selected polygon as quality=`good` and **auto-save** LabelMe. Locked polys are green, not editable until unlocked (`Shift+K`).
+- **`Ctrl+S`** — save without advancing.
+- **`N`** / **`Ctrl+Enter`** — **Save & Next**: save, then jump to the next thumb that still needs work (respects `Shift+W` order / unlocked-first).
+- **`S`** / “SAM from boxes” — run SAM on imported `turtle_box` rectangles (after `outline-import-boxes`).
+
+Grid prompts (`P`/`B`/`D` outside the viewer) use crop-relative coords when crop zoom is on. `Shift+P` turns outline prompt mode off.
+
+### Draft polygons from the CLI
+
+```bash
+# SAM drafts beside each thumb ( Ultralytics; needs [sam] )
+symsorter outline-draft \
+  --thumbs /path/to/sorted \
+  --out /path/to/outline_manifests \
+  --backend sam \
+  --limit 50
+
+# Also available: --backend box | threshold
+# Use --overwrite carefully: skip_json skips any sibling .json (including old length/width lines)
+```
+
+Import YOLO/SHAI boxes onto thumbs (for “SAM from boxes” in the viewer):
+
+```bash
+symsorter outline-import-boxes \
+  --thumbs /Volumes/turtle_apfs/sorted \
+  --yolo-finds /Volumes/turtle_apfs/yolo_finds \
+  --overwrite --limit 100
+# optional: --sam   or press S in the Outline viewer
+```
+
+### Outline quality notes
+
+- Single class `turtle`. Outline the **animal body** only.
+- **Exclude** cast shadows, wake, and **sunglint/glitter** — even on the shell edge. Mild glint on a still-readable carapace is OK; skip (or leave unlocked) when heavy wash makes the edge guesswork.
+- Prefer clear surface (then clear deep) for the first cleaned batch; wave/double-flipper / heavy blur cases → leave unlocked or skip.
+- Lock (`K`) only when the outline is good enough that you do not want to redo it.
+
 ## GUI Controls
 
 Common shortcuts:
 
 - `Ctrl+O`: Load embeddings NPZ
 - `Ctrl+Shift+O`: Load class file
-- `Ctrl+S`: Save classifications
+- `Ctrl+S`: Save classifications (in outline viewer: save polygons)
 - `Ctrl+E`: Export YOLO annotations
 - `Ctrl+J`: Export classifications JSON
 - `Ctrl+Shift+J`: Import classifications JSON
 - `R`: Reset order
-- `L`: Toggle classification labels
+- `L`: Toggle classification labels (in outline viewer: lasso tool)
 - `Shift+C`: Sort by class
 - `Ctrl+Shift+C`: Show classified images
 - `Ctrl+=` / `Ctrl+-`: Thumbnail size
 - `Shift+Ctrl+=` / `Shift+Ctrl+-`: Crop zoom
 - Double-click image: sort by visual similarity
+- `O`: Outline viewer (see [Outline mode](#outline-mode-turtle-polygons))
+- `Shift+O`: Toggle outline overlays (crop-aware; locked polys draw green)
+- `Shift+W`: Sort by outline needs-work (unlocked/empty first, locked last)
+- `P` / `B` / `D`: In-grid SAM point / box / delete (multi-turtle; Del = last; Shift+Del = clear)
+- `Shift+P`: Turn outline prompt mode off
 
 Class assignment shortcuts come from your class file `keystroke` values.
 

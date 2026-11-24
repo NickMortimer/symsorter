@@ -76,8 +76,9 @@ class ImageBrowser(QMainWindow,
         layout.addWidget(self.view)
 
         # Defaults needed by menus/handlers
-        self.icon_sizes = {"Small": 96, "Medium": 128, "Large": 160, "XL": 196}
-        self.current_size_name = getattr(self, "current_size_name", "Medium")
+        # XL/XXL are large enough for in-grid SAM point/box prompting.
+        self.icon_sizes = {"Small": 96, "Medium": 128, "Large": 160, "XL": 224, "XXL": 336}
+        self.current_size_name = getattr(self, "current_size_name", "XL")
         self.icon_size = self.icon_sizes[self.current_size_name]
         self.update_placeholder_icon()
         self.show_classification_labels = False
@@ -142,6 +143,9 @@ class ImageBrowser(QMainWindow,
         self.gps = {}
         self.classification_viewer = None  # Classification viewer window
         self.show_classification_labels = False
+        self.show_outline_overlays = True  # draw sibling LabelMe polygons on grid thumbs
+        self.outline_sam_model = "sam_b.pt"
+        self.outline_sam_device = None  # Ultralytics default (mps/cpu)
         self.current_sort_mode = None  # 'class' when sorting by class
         
         # Create a simple placeholder icon (will be updated with zoom)
@@ -174,6 +178,12 @@ class ImageBrowser(QMainWindow,
         except Exception:
             pass
         self.view.doubleClicked.connect(self.on_double_click)
+
+        # In-grid SAM point/box prompting (works best at XL/XXL)
+        from .ui.grid_outline_prompt import GridOutlinePromptFilter
+
+        self._grid_outline_prompt = GridOutlinePromptFilter(self)
+        self._grid_outline_prompt.ensure_installed()
 
         # Set up menus and toolbar
         self.setup_menus_and_toolbar()
@@ -223,6 +233,12 @@ class ImageBrowser(QMainWindow,
         """Setup keyboard shortcuts for class assignment"""        
         # Class shortcuts come from Classes menu actions
         self.function_key_shortcuts = []
+
+    def open_outline_viewer(self):
+        """Show sibling LabelMe polygons for the selected thumb(s)."""
+        from .ui.outline_dialog import open_outline_viewer_for_browser
+
+        open_outline_viewer_for_browser(self)
     
     def create_class_assignment_handler(self, class_idx):
         """Create a proper closure for class assignment"""
@@ -232,21 +248,112 @@ class ImageBrowser(QMainWindow,
         return handler
     
 
-    # Cache wrappers (unchanged signatures)
-    def get_cache_key(self, filename, icon_size, crop_size):
-        return self._cache.get_cache_key(filename, icon_size, crop_size)
+    # Cache wrappers
+    def _outline_cache_variant(self):
+        return "outline" if getattr(self, "show_outline_overlays", False) else None
 
-    def get_cached_icon(self, filename, icon_size, crop_size):
-        return self._cache.get_cached_icon(filename, icon_size, crop_size)
+    def get_cache_key(self, filename, icon_size, crop_size, variant=None):
+        if variant is None:
+            variant = self._outline_cache_variant()
+        return self._cache.get_cache_key(filename, icon_size, crop_size, variant=variant)
 
-    def cache_icon(self, filename, icon_size, crop_size, icon):
-        return self._cache.cache_icon(filename, icon_size, crop_size, icon)
+    def get_cached_icon(self, filename, icon_size, crop_size, variant=None):
+        if variant is None:
+            variant = self._outline_cache_variant()
+        return self._cache.get_cached_icon(
+            filename, icon_size, crop_size, variant=variant
+        )
+
+    def cache_icon(self, filename, icon_size, crop_size, icon, variant=None):
+        if variant is None:
+            variant = self._outline_cache_variant()
+        return self._cache.cache_icon(
+            filename, icon_size, crop_size, icon, variant=variant
+        )
 
     def get_cached_raw_image(self, filename):
         return self._cache.get_cached_raw_image(filename)
 
     def cache_raw_image(self, filename, pixmap):
         return self._cache.cache_raw_image(filename, pixmap)
+
+    def toggle_outline_overlays(self, checked=None):
+        """Toggle polygon outlines on grid thumbnails and reload icons."""
+        if checked is None:
+            checked = not getattr(self, "show_outline_overlays", False)
+        self.show_outline_overlays = bool(checked)
+        if hasattr(self, "show_outline_overlays_action"):
+            self.show_outline_overlays_action.setChecked(self.show_outline_overlays)
+        # Drop processed icons so workers rebuild with/without overlays.
+        if hasattr(self, "_cache"):
+            self._cache.image_cache.clear()
+            self._cache.cache_access_order = [
+                k for k in self._cache.cache_access_order if not isinstance(k, tuple)
+            ]
+        if hasattr(self, "reload_images_with_new_size"):
+            self.reload_images_with_new_size()
+        tip = "on" if self.show_outline_overlays else "off"
+        if hasattr(self, "statusBar") and self.statusBar():
+            self.statusBar().showMessage(f"Outline overlays {tip}", 3000)
+
+    def set_outline_prompt_mode(self, mode: str) -> None:
+        """Enable in-grid outline tools: ``off`` | ``point`` | ``box`` | ``delete``."""
+        if not hasattr(self, "_grid_outline_prompt"):
+            return
+        self._grid_outline_prompt.set_mode(mode)
+        # Keep menu checks in sync if present
+        for name, value in (
+            ("outline_prompt_off_action", "off"),
+            ("outline_prompt_point_action", "point"),
+            ("outline_prompt_box_action", "box"),
+            ("outline_prompt_delete_action", "delete"),
+        ):
+            act = getattr(self, name, None)
+            if act is not None:
+                act.setChecked(mode == value)
+
+    def refresh_outline_icon(self, filename: str) -> None:
+        """Drop cached icons for one thumb and reload it (after SAM save)."""
+        import os
+
+        key_fn = os.path.basename(filename)
+        if hasattr(self, "_cache"):
+            drop = [
+                k
+                for k in list(self._cache.image_cache.keys())
+                if isinstance(k, tuple) and k and k[0] == key_fn
+            ]
+            for k in drop:
+                self._cache.image_cache.pop(k, None)
+                if k in self._cache.cache_access_order:
+                    self._cache.cache_access_order.remove(k)
+
+        # Find model row and re-queue load
+        model = getattr(self, "model", None)
+        if not model:
+            return
+        for row in range(model.rowCount()):
+            it = model.item(row)
+            if not it:
+                continue
+            fn = it.data(Qt.UserRole)
+            if fn != filename and os.path.basename(str(fn)) != key_fn:
+                continue
+            # Clear to placeholder then load
+            if hasattr(self, "placeholder_icon"):
+                it.setIcon(self.placeholder_icon)
+            folder = getattr(self, "folder", "") or ""
+            file_path = os.path.join(folder, key_fn) if folder else key_fn
+            if hasattr(self, "load_image_batch"):
+                # Reuse single-index load path
+                from .core.image_worker import ImageLoadWorker
+
+                worker = ImageLoadWorker(
+                    row, file_path, self.icon_size, self.crop_size, cache_manager=self
+                )
+                worker.signals.imageLoaded.connect(self.update_image)
+                self.thread_pool.start(worker)
+            break
 
     def clear_caches(self):
         return self._cache.clear()
@@ -330,6 +437,41 @@ class ImageBrowser(QMainWindow,
         if hasattr(self, "enable_class_group_wrapping"):
             self.enable_class_group_wrapping(False)
         self.rebuild_model_after_sort()
+
+    def sort_by_outline_needs_work(self):
+        """Sort: unlocked/empty outlines first, quality-locked (done) last."""
+        if not self.image_files:
+            return
+        from pathlib import Path
+
+        from symsorter.outline.export_labelme import (
+            labelme_path_for_thumb,
+            outline_work_status,
+        )
+
+        folder = Path(getattr(self, "folder", "") or "")
+
+        def key_fn(fn):
+            status = outline_work_status(labelme_path_for_thumb(folder / fn))
+            # empty & needs_work first (0), done last (1)
+            bucket = 0 if status != "done" else 1
+            return (bucket, status, fn)
+
+        self.image_files.sort(key=key_fn)
+        self.current_sort_mode = "outline_needs_work"
+        if hasattr(self, "enable_class_group_wrapping"):
+            self.enable_class_group_wrapping(False)
+        self.rebuild_model_after_sort()
+        n_todo = sum(
+            1
+            for fn in self.image_files
+            if outline_work_status(labelme_path_for_thumb(folder / fn)) != "done"
+        )
+        if hasattr(self, "statusBar") and self.statusBar():
+            self.statusBar().showMessage(
+                f"Sorted by outline needs-work — {n_todo} still need review",
+                5000,
+            )
 
     def on_double_click(self, index: QModelIndex):
         """Global similarity sort, then restrict to current filter for the view."""

@@ -98,12 +98,92 @@ def build_menus(window):
     sort_by_class_action.triggered.connect(window.sort_by_class)
     view_menu.addAction(sort_by_class_action)
 
+    # Sort by outline quality / needs work
+    sort_outline_action = QAction('Sort by Outline &Needs Work', window)
+    sort_outline_action.setShortcut(QKeySequence('Shift+W'))
+    sort_outline_action.setStatusTip(
+        'Unlocked / missing turtle polygons first; quality-locked last'
+    )
+    sort_outline_action.triggered.connect(window.sort_by_outline_needs_work)
+    view_menu.addAction(sort_outline_action)
+    window.sort_outline_action = sort_outline_action
+
     # Show only classified images
     show_classified_action = QAction('Show &Classified Images', window)
     show_classified_action.setShortcut(QKeySequence('Ctrl+Shift+C'))
     show_classified_action.setStatusTip('Show all classified images')
     show_classified_action.triggered.connect(window.show_classified_images)
     view_menu.addAction(show_classified_action)
+
+    view_menu.addSeparator()
+
+    # Outline polygon viewer (sibling LabelMe JSON)
+    outline_action = QAction('&Outline Viewer…', window)
+    outline_action.setShortcut(QKeySequence('O'))
+    outline_action.setStatusTip(
+        'Show LabelMe polygons on the selected thumb(s) (sibling *.json)'
+    )
+    outline_action.triggered.connect(window.open_outline_viewer)
+    view_menu.addAction(outline_action)
+    window.outline_action = outline_action
+
+    # Grid overlay of sibling LabelMe polygons
+    outline_overlay_action = QAction('Show Outline &Overlays', window)
+    outline_overlay_action.setShortcut(QKeySequence('Shift+O'))
+    outline_overlay_action.setCheckable(True)
+    outline_overlay_action.setChecked(getattr(window, 'show_outline_overlays', True))
+    outline_overlay_action.setStatusTip(
+        'Draw turtle polygons from sibling LabelMe JSON onto grid thumbnails'
+    )
+    outline_overlay_action.triggered.connect(window.toggle_outline_overlays)
+    view_menu.addAction(outline_overlay_action)
+    window.show_outline_overlays_action = outline_overlay_action
+
+    # In-grid SAM prompting (stay in icon view — best at XL/XXL)
+    prompt_menu = view_menu.addMenu('Outline &Prompt (grid)')
+    window.outline_prompt_group = QActionGroup(window)
+    window.outline_prompt_group.setExclusive(True)
+
+    prompt_off = QAction('&Off', window)
+    prompt_off.setCheckable(True)
+    prompt_off.setChecked(True)
+    prompt_off.setShortcut(QKeySequence('Shift+P'))
+    prompt_off.setStatusTip('Disable in-grid SAM prompting')
+    prompt_off.triggered.connect(lambda: window.set_outline_prompt_mode('off'))
+    window.outline_prompt_group.addAction(prompt_off)
+    prompt_menu.addAction(prompt_off)
+    window.outline_prompt_off_action = prompt_off
+
+    prompt_point = QAction('Click &Point → SAM', window)
+    prompt_point.setCheckable(True)
+    prompt_point.setShortcut(QKeySequence('P'))
+    prompt_point.setStatusTip(
+        'Click on a grid thumb to ADD a SAM polygon (multi-turtle OK; stay in grid)'
+    )
+    prompt_point.triggered.connect(lambda: window.set_outline_prompt_mode('point'))
+    window.outline_prompt_group.addAction(prompt_point)
+    prompt_menu.addAction(prompt_point)
+    window.outline_prompt_point_action = prompt_point
+
+    prompt_box = QAction('Drag &Box → SAM', window)
+    prompt_box.setCheckable(True)
+    prompt_box.setShortcut(QKeySequence('B'))
+    prompt_box.setStatusTip('Drag a box on a grid thumb to prompt SAM (adds another polygon)')
+    prompt_box.triggered.connect(lambda: window.set_outline_prompt_mode('box'))
+    window.outline_prompt_group.addAction(prompt_box)
+    prompt_menu.addAction(prompt_box)
+    window.outline_prompt_box_action = prompt_box
+
+    prompt_delete = QAction('&Delete polygon (click)', window)
+    prompt_delete.setCheckable(True)
+    prompt_delete.setShortcut(QKeySequence('D'))
+    prompt_delete.setStatusTip(
+        'Click a polygon on a grid thumb to delete it; Del = last; Shift+Del = clear all'
+    )
+    prompt_delete.triggered.connect(lambda: window.set_outline_prompt_mode('delete'))
+    window.outline_prompt_group.addAction(prompt_delete)
+    prompt_menu.addAction(prompt_delete)
+    window.outline_prompt_delete_action = prompt_delete
 
     view_menu.addSeparator()
 
@@ -188,5 +268,10 @@ def build_menus(window):
     toolbar.addAction(show_classified_action)
     toolbar.addAction(show_labels_action)
     toolbar.addAction(sort_by_class_action)
+    toolbar.addAction(outline_action)
+    toolbar.addAction(outline_overlay_action)
+    toolbar.addAction(prompt_point)
+    toolbar.addAction(prompt_box)
+    toolbar.addAction(prompt_off)
 
 

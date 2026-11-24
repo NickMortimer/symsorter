@@ -1,0 +1,1459 @@
+"""Outline viewer: zoomable multi-turtle editor (vertices, lasso, eraser, SAM)."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, Signal
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QKeySequence,
+    QPainter,
+    QPen,
+    QPixmap,
+    QPolygonF,
+    QShortcut,
+    QWheelEvent,
+)
+from PySide6.QtWidgets import (
+    QButtonGroup,
+    QDialog,
+    QHBoxLayout,
+    QLabel,
+    QMessageBox,
+    QPushButton,
+    QRadioButton,
+    QVBoxLayout,
+    QWidget,
+)
+
+from symsorter.outline.backends import DEFAULT_THUMB_SIZE, load_sam_model, sam_polygon
+from symsorter.outline.edit_geom import (
+    append_lasso_click,
+    delete_points_inside,
+    erase_points_near,
+    fit_view,
+    hit_polygon_index,
+    insert_vertex,
+    nearest_edge,
+    nearest_vertex,
+    next_index,
+    remove_vertex,
+    zoom_at_pointer,
+)
+from symsorter.outline.export_labelme import (
+    extract_polygons,
+    extract_rectangles,
+    is_polygon_locked,
+    labelme_path_for_thumb,
+    load_labelme_json,
+    set_polygon_locked,
+    set_turtle_polygons,
+    simplify_polyline,
+    thumb_needs_outline_work,
+)
+from symsorter.outline.filename import parse_thumb_filename
+
+DEFAULT_DISPLAY_SIZE = 720
+FIT_PAD_FRAC = 0.10
+MIN_VERTICES = 3
+# Hit thresholds in *screen* pixels (converted via / zoom)
+VERTEX_HIT_PX = 10.0
+EDGE_HIT_PX = 8.0
+ERASER_RADIUS_PX = 14.0
+LASSO_DRAG_THRESH_PX = 6.0  # widget px: below = click, above = freehand
+LASSO_CLOSE_HIT_PX = 12.0  # widget px: click near start closes click-lasso
+
+
+def render_thumb_with_polygons(
+    image_path: Path,
+    polygons: list[dict[str, Any]],
+    display_size: int = DEFAULT_DISPLAY_SIZE,
+    selected_index: int | None = None,
+) -> QPixmap:
+    """Backward-compatible helper used by tests: scale + draw filled polys."""
+    from symsorter.outline.overlay import draw_polygons_on_pixmap
+
+    pix = QPixmap(str(image_path))
+    if pix.isNull():
+        blank = QPixmap(display_size, display_size)
+        blank.fill(QColor(40, 40, 40))
+        return blank
+
+    scaled = pix.scaled(
+        display_size,
+        display_size,
+        Qt.KeepAspectRatio,
+        Qt.SmoothTransformation,
+    )
+    if not polygons:
+        return scaled
+    return draw_polygons_on_pixmap(
+        scaled,
+        polygons,
+        source_width=pix.width(),
+        source_height=pix.height(),
+        outline_only=False,
+        selected_index=selected_index,
+    )
+
+
+class OutlineCanvas(QWidget):
+    """Zoomable image canvas with vertex edit / lasso / eraser / SAM tools."""
+
+    pointSeeded = Signal(float, float)
+    boxSeeded = Signal(float, float, float, float)
+    polygonsChanged = Signal()  # after in-place vertex edits
+    statusMessage = Signal(str)
+    selectionChanged = Signal(object)  # int | None
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setMinimumSize(320, 320)
+
+        self.mode = "edit"
+        self._src: QPixmap | None = None
+        self._img_w = DEFAULT_THUMB_SIZE
+        self._img_h = DEFAULT_THUMB_SIZE
+        self._polygons: list[dict[str, Any]] = []
+        self._selected: int | None = None
+
+        self._zoom = 1.0
+        self._ox = 0.0
+        self._oy = 0.0
+        self._fit_pending = True
+
+        # Interaction state
+        self._drag_vertex: int | None = None
+        self._box_origin: QPoint | None = None
+        self._box_current: QPoint | None = None
+        self._lasso: list[tuple[float, float]] = []
+        self._drawing_lasso = False  # freehand drag in progress
+        self._lasso_press_widget: QPoint | None = None
+        self._lasso_press_img: tuple[float, float] | None = None
+        self._panning = False
+        self._pan_last: QPoint | None = None
+        self._erasing = False
+        self._hover: QPoint | None = None
+
+    # ----- public API -----
+
+    def set_mode(self, mode: str) -> None:
+        self.mode = mode
+        self._cancel_transient()
+        cursors = {
+            "edit": Qt.ArrowCursor,
+            "add_point": Qt.CrossCursor,
+            "lasso": Qt.CrossCursor,
+            "eraser": Qt.CrossCursor,
+            "point": Qt.CrossCursor,
+            "box": Qt.CrossCursor,
+            "delete": Qt.PointingHandCursor,
+            "view": Qt.OpenHandCursor,
+        }
+        self.setCursor(cursors.get(mode, Qt.ArrowCursor))
+        self.update()
+
+    def set_scene(
+        self,
+        pixmap: QPixmap,
+        polygons: list[dict[str, Any]],
+        *,
+        selected_index: int | None,
+        image_width: int,
+        image_height: int,
+        refit: bool = False,
+    ) -> None:
+        self._src = QPixmap(pixmap) if pixmap is not None else None
+        self._img_w = max(1, image_width)
+        self._img_h = max(1, image_height)
+        self._polygons = polygons
+        self._selected = selected_index
+        self._cancel_transient()
+        if refit or self._fit_pending:
+            self._fit_pending = True
+            self.fit_to_polygons()
+        self.update()
+
+    def set_selected(self, index: int | None) -> None:
+        self._selected = index
+        self.update()
+
+    def fit_to_polygons(self) -> None:
+        if self.width() < 2 or self.height() < 2:
+            self._fit_pending = True
+            return
+        z, ox, oy = fit_view(
+            view_w=float(self.width()),
+            view_h=float(self.height()),
+            img_w=float(self._img_w),
+            img_h=float(self._img_h),
+            polygons=self._polygons,
+            pad_frac=FIT_PAD_FRAC,
+        )
+        self._zoom, self._ox, self._oy = z, ox, oy
+        self._fit_pending = False
+        self.update()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        if self._fit_pending:
+            self.fit_to_polygons()
+
+    # ----- coordinate transforms -----
+
+    def _img_to_widget(self, ix: float, iy: float) -> QPointF:
+        return QPointF(self._ox + ix * self._zoom, self._oy + iy * self._zoom)
+
+    def _widget_to_img(self, pos: QPoint | QPointF) -> tuple[float, float]:
+        ix = (float(pos.x()) - self._ox) / max(1e-9, self._zoom)
+        iy = (float(pos.y()) - self._oy) / max(1e-9, self._zoom)
+        return ix, iy
+
+    def _hit_radius_img(self, screen_px: float) -> float:
+        return screen_px / max(1e-9, self._zoom)
+
+    def _selected_points(self) -> list[list[float]] | None:
+        if self._selected is None or not (0 <= self._selected < len(self._polygons)):
+            return None
+        return self._polygons[self._selected].get("points")
+
+    def _selected_is_locked(self) -> bool:
+        if self._selected is None or not (0 <= self._selected < len(self._polygons)):
+            return False
+        return is_polygon_locked(self._polygons[self._selected])
+
+    def _set_selected_points(self, pts: list[list[float]]) -> None:
+        if self._selected is None or not (0 <= self._selected < len(self._polygons)):
+            return
+        if is_polygon_locked(self._polygons[self._selected]):
+            self.statusMessage.emit("Polygon is locked — press K to unlock before editing.")
+            return
+        self._polygons[self._selected]["points"] = pts
+        self.polygonsChanged.emit()
+
+    def _cancel_transient(self) -> None:
+        self._drag_vertex = None
+        self._box_origin = None
+        self._box_current = None
+        self._clear_lasso_state()
+        self._panning = False
+        self._pan_last = None
+        self._erasing = False
+
+    def _clear_lasso_state(self) -> None:
+        self._lasso = []
+        self._drawing_lasso = False
+        self._lasso_press_widget = None
+        self._lasso_press_img = None
+
+    # ----- painting -----
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor(28, 28, 32))
+        if self._src is None or self._src.isNull():
+            painter.setPen(QColor(180, 180, 180))
+            painter.drawText(self.rect(), Qt.AlignCenter, "No image")
+            painter.end()
+            return
+
+        painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+
+        target = QRectF(
+            self._ox,
+            self._oy,
+            self._img_w * self._zoom,
+            self._img_h * self._zoom,
+        )
+        painter.drawPixmap(target, self._src, QRectF(self._src.rect()))
+
+        for i, shape in enumerate(self._polygons):
+            pts = shape.get("points") or []
+            if len(pts) < 2:
+                continue
+            selected = i == self._selected
+            locked = is_polygon_locked(shape)
+            if locked:
+                pen = QPen(QColor(80, 220, 90, 240))
+                brush = QColor(80, 220, 90, 40)
+            elif selected:
+                pen = QPen(QColor(255, 80, 80, 240))
+                brush = QColor(255, 80, 80, 45)
+            else:
+                pen = QPen(QColor(0, 255, 200, 220))
+                brush = QColor(0, 220, 180, 35)
+            # Edit mode: outline only so the animal edge stays visible under vertices
+            if self.mode in {"edit", "add_point"}:
+                brush = Qt.NoBrush
+            pen.setWidthF(2.2 if selected else 1.5)
+            painter.setPen(pen)
+            painter.setBrush(brush)
+            poly = QPolygonF([self._img_to_widget(float(p[0]), float(p[1])) for p in pts])
+            painter.drawPolygon(poly)
+
+            if selected and not locked:
+                for p in pts:
+                    wp = self._img_to_widget(float(p[0]), float(p[1]))
+                    painter.setBrush(QColor(255, 255, 255, 230))
+                    painter.setPen(QPen(QColor(220, 40, 40), 1.5))
+                    painter.drawEllipse(wp, 4.0, 4.0)
+            elif selected and locked:
+                # Locked: square markers (not draggable)
+                for p in pts:
+                    wp = self._img_to_widget(float(p[0]), float(p[1]))
+                    painter.setBrush(QColor(80, 220, 90, 220))
+                    painter.setPen(QPen(QColor(20, 100, 40), 1.2))
+                    painter.drawRect(QRectF(wp.x() - 3, wp.y() - 3, 6, 6))
+
+        # Lasso preview (freehand or click-to-place)
+        if self._lasso:
+            pts_w = [self._img_to_widget(x, y) for x, y in self._lasso]
+            painter.setPen(QPen(QColor(255, 220, 0), 2))
+            painter.setBrush(QColor(255, 220, 0, 40))
+            if len(pts_w) >= 2:
+                painter.drawPolyline(QPolygonF(pts_w))
+            # Rubber-band to hover while placing clicks (not mid-freehand)
+            if (
+                not self._drawing_lasso
+                and self._hover is not None
+                and self.mode == "lasso"
+            ):
+                painter.setPen(QPen(QColor(255, 220, 0, 160), 1, Qt.DashLine))
+                painter.drawLine(pts_w[-1], QPointF(self._hover))
+            # Vertex dots; emphasize start (close target)
+            for i, wp in enumerate(pts_w):
+                r = 5.0 if i == 0 else 3.5
+                painter.setBrush(QColor(255, 240, 80, 230))
+                painter.setPen(QPen(QColor(180, 120, 0), 1.2))
+                painter.drawEllipse(wp, r, r)
+
+        # SAM box preview
+        if self._box_origin is not None and self._box_current is not None:
+            painter.setPen(QPen(QColor(255, 220, 0), 2, Qt.DashLine))
+            painter.setBrush(QColor(255, 220, 0, 40))
+            painter.drawRect(
+                QRectF(self._box_origin, self._box_current).normalized()
+            )
+
+        # Eraser cursor circle
+        if self.mode == "eraser" and self._hover is not None:
+            painter.setPen(QPen(QColor(255, 120, 80, 220), 1.5))
+            painter.setBrush(QColor(255, 120, 80, 40))
+            painter.drawEllipse(
+                QPointF(self._hover), ERASER_RADIUS_PX, ERASER_RADIUS_PX
+            )
+
+        painter.end()
+
+    # ----- input -----
+
+    def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802
+        delta = event.angleDelta().y()
+        if delta == 0:
+            return
+        factor = 1.15 if delta > 0 else 1.0 / 1.15
+        pos = event.position()
+        self._zoom, self._ox, self._oy = zoom_at_pointer(
+            zoom=self._zoom,
+            offset_x=self._ox,
+            offset_y=self._oy,
+            pointer_x=float(pos.x()),
+            pointer_y=float(pos.y()),
+            factor=factor,
+        )
+        self.update()
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        pos = event.position().toPoint()
+
+        # Pan: middle button, or right button, or Space+left, or view mode left
+        if event.button() == Qt.MiddleButton or event.button() == Qt.RightButton or (
+            event.button() == Qt.LeftButton
+            and (self.mode == "view" or bool(event.modifiers() & Qt.AltModifier))
+        ):
+            self._panning = True
+            self._pan_last = pos
+            self.setCursor(Qt.ClosedHandCursor)
+            return
+
+        if event.button() != Qt.LeftButton:
+            return super().mousePressEvent(event)
+
+        ix, iy = self._widget_to_img(pos)
+
+        if self.mode == "point":
+            self.pointSeeded.emit(ix, iy)
+            return
+
+        if self.mode == "box":
+            self._box_origin = pos
+            self._box_current = pos
+            self.update()
+            return
+
+        if self.mode == "delete":
+            hit = hit_polygon_index(self._polygons, ix, iy)
+            if hit is not None:
+                if is_polygon_locked(self._polygons[hit]):
+                    self.statusMessage.emit(
+                        "Polygon is locked — unlock (K) before deleting."
+                    )
+                    return
+                self._polygons.pop(hit)
+                self._selected = (
+                    min(hit, len(self._polygons) - 1) if self._polygons else None
+                )
+                self.selectionChanged.emit(self._selected)
+                self.polygonsChanged.emit()
+                self.statusMessage.emit(
+                    f"Deleted polygon. {len(self._polygons)} remaining."
+                )
+                self.update()
+            return
+
+        if self.mode == "lasso":
+            if self._selected_is_locked():
+                self.statusMessage.emit("Selected polygon is locked — unlock (K) first.")
+                return
+            # Defer click vs freehand until move/release (threshold).
+            self._lasso_press_widget = pos
+            self._lasso_press_img = (ix, iy)
+            self._drawing_lasso = False
+            self.update()
+            return
+
+        if self.mode == "eraser":
+            if self._selected_is_locked():
+                self.statusMessage.emit("Selected polygon is locked — unlock (K) first.")
+                return
+            self._erasing = True
+            self._erase_at(ix, iy)
+            return
+
+        if self.mode in {"edit", "add_point"}:
+            self._edit_press(ix, iy)
+            return
+
+        super().mousePressEvent(event)
+
+    def _edit_press(self, ix: float, iy: float) -> None:
+        # Prefer vertex on selected poly
+        pts = self._selected_points()
+        locked = self._selected_is_locked()
+        if pts is not None and not locked:
+            vi = nearest_vertex(
+                pts, ix, iy, max_dist=self._hit_radius_img(VERTEX_HIT_PX)
+            )
+            if vi is not None and self.mode == "edit":
+                self._drag_vertex = vi
+                return
+            # Insert on edge
+            if self.mode in {"edit", "add_point"}:
+                edge = nearest_edge(
+                    pts, ix, iy, max_dist=self._hit_radius_img(EDGE_HIT_PX)
+                )
+                if edge is not None:
+                    after, px, py = edge
+                    ax, ay = (ix, iy) if self.mode == "add_point" else (px, py)
+                    new_pts = insert_vertex(pts, after, ax, ay)
+                    self._set_selected_points(new_pts)
+                    self._drag_vertex = after + 1 if self.mode == "edit" else None
+                    if self.mode == "edit":
+                        self.statusMessage.emit(
+                            f"Inserted vertex (now {len(new_pts)}) — drag to place."
+                        )
+                    else:
+                        self.statusMessage.emit(
+                            f"Added vertex (now {len(new_pts)}). Save when done."
+                        )
+                    self.update()
+                    return
+
+        # Select another polygon
+        hit = hit_polygon_index(self._polygons, ix, iy)
+        if hit is not None and hit != self._selected:
+            self._selected = hit
+            self.selectionChanged.emit(hit)
+            lock_note = " (locked)" if is_polygon_locked(self._polygons[hit]) else ""
+            self.statusMessage.emit(f"Selected polygon #{hit + 1}{lock_note}")
+            self.update()
+            return
+
+        if locked and pts is not None:
+            self.statusMessage.emit("Polygon is locked — press K to unlock before editing.")
+            return
+
+        if self.mode == "add_point" and pts is not None and len(pts) >= 2:
+            edge = nearest_edge(pts, ix, iy, max_dist=1e9)
+            if edge is not None:
+                after, _, _ = edge
+                new_pts = insert_vertex(pts, after, ix, iy)
+                self._set_selected_points(new_pts)
+                self.statusMessage.emit(
+                    f"Added vertex (now {len(new_pts)}). Save when done."
+                )
+                self.update()
+
+    def _erase_at(self, ix: float, iy: float) -> None:
+        pts = self._selected_points()
+        if pts is None:
+            # Auto-select under eraser
+            hit = hit_polygon_index(self._polygons, ix, iy)
+            if hit is None:
+                return
+            self._selected = hit
+            self.selectionChanged.emit(hit)
+            pts = self._selected_points()
+            if pts is None:
+                return
+        radius = self._hit_radius_img(ERASER_RADIUS_PX)
+        new_pts, n = erase_points_near(
+            pts, ix, iy, radius=radius, min_keep=MIN_VERTICES
+        )
+        if n:
+            self._set_selected_points(new_pts)
+            self.statusMessage.emit(
+                f"Erased {n} vertex(es); {len(new_pts)} left. Save when done."
+            )
+            self.update()
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        pos = event.position().toPoint()
+        self._hover = pos
+        if self.mode == "eraser" and not self._erasing and not self._panning:
+            self.update()
+        elif (
+            self.mode == "lasso"
+            and self._lasso
+            and not self._drawing_lasso
+            and self._lasso_press_widget is None
+            and not self._panning
+        ):
+            self.update()  # rubber-band to cursor
+
+        if self._panning and self._pan_last is not None:
+            dx = pos.x() - self._pan_last.x()
+            dy = pos.y() - self._pan_last.y()
+            self._ox += dx
+            self._oy += dy
+            self._pan_last = pos
+            self.update()
+            return
+
+        if self.mode == "box" and self._box_origin is not None:
+            self._box_current = pos
+            self.update()
+            return
+
+        if self.mode == "lasso" and (
+            self._drawing_lasso or self._lasso_press_widget is not None
+        ):
+            if self._lasso_press_widget is not None and not self._drawing_lasso:
+                dx = pos.x() - self._lasso_press_widget.x()
+                dy = pos.y() - self._lasso_press_widget.y()
+                if (dx * dx + dy * dy) ** 0.5 >= LASSO_DRAG_THRESH_PX:
+                    # Promote to freehand; keep any prior click vertices.
+                    press = self._lasso_press_img
+                    if press is not None:
+                        if not self._lasso or self._lasso[-1] != press:
+                            self._lasso.append(press)
+                    self._drawing_lasso = True
+            if self._drawing_lasso:
+                ix, iy = self._widget_to_img(pos)
+                self._lasso.append((ix, iy))
+                self.update()
+            return
+
+        if self.mode == "eraser" and self._erasing:
+            ix, iy = self._widget_to_img(pos)
+            self._erase_at(ix, iy)
+            return
+
+        if self._drag_vertex is not None and self.mode == "edit":
+            pts = self._selected_points()
+            if pts is not None and 0 <= self._drag_vertex < len(pts):
+                ix, iy = self._widget_to_img(pos)
+                ix = max(0.0, min(float(self._img_w - 1), ix))
+                iy = max(0.0, min(float(self._img_h - 1), iy))
+                pts = [list(p) for p in pts]
+                pts[self._drag_vertex] = [ix, iy]
+                self._set_selected_points(pts)
+                self.update()
+            return
+
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if self._panning and event.button() in (
+            Qt.MiddleButton,
+            Qt.RightButton,
+            Qt.LeftButton,
+        ):
+            self._panning = False
+            self._pan_last = None
+            self.set_mode(self.mode)  # restore cursor
+            return
+
+        if event.button() != Qt.LeftButton:
+            return super().mouseReleaseEvent(event)
+
+        if self._drag_vertex is not None:
+            self._drag_vertex = None
+            self.statusMessage.emit("Moved vertex. Save when done.")
+            return
+
+        if self._erasing:
+            self._erasing = False
+            return
+
+        if self.mode == "box" and self._box_origin is not None:
+            p0 = self._widget_to_img(self._box_origin)
+            p1 = self._widget_to_img(self._box_current or self._box_origin)
+            self._box_origin = None
+            self._box_current = None
+            self.update()
+            x1, y1 = min(p0[0], p1[0]), min(p0[1], p1[1])
+            x2, y2 = max(p0[0], p1[0]), max(p0[1], p1[1])
+            if (x2 - x1) >= 2 and (y2 - y1) >= 2:
+                self.boxSeeded.emit(x1, y1, x2, y2)
+            return
+
+        if self.mode == "lasso" and (
+            self._drawing_lasso or self._lasso_press_img is not None
+        ):
+            if self._drawing_lasso:
+                # Freehand stroke finished on release.
+                self._drawing_lasso = False
+                self._lasso_press_widget = None
+                self._lasso_press_img = None
+                raw = list(self._lasso)
+                self._lasso = []
+                self.update()
+                if len(raw) >= MIN_VERTICES:
+                    lasso = simplify_polyline(
+                        [[float(x), float(y)] for x, y in raw], max_points=96
+                    )
+                    if len(lasso) < MIN_VERTICES:
+                        lasso = [[float(x), float(y)] for x, y in raw]
+                    self._apply_lasso_delete(lasso)
+                else:
+                    self.statusMessage.emit(
+                        "Freehand lasso needs ≥3 points (drag further)."
+                    )
+                return
+
+            # Click (no drag past threshold): place a vertex or close.
+            press = self._lasso_press_img
+            self._lasso_press_widget = None
+            self._lasso_press_img = None
+            if press is None:
+                return
+            close_dist = self._hit_radius_img(LASSO_CLOSE_HIT_PX)
+            self._lasso, action = append_lasso_click(
+                self._lasso,
+                press[0],
+                press[1],
+                close_dist=close_dist,
+                min_points=MIN_VERTICES,
+            )
+            if action == "closed":
+                self._finish_click_lasso()
+            elif action == "appended":
+                n = len(self._lasso)
+                self.statusMessage.emit(
+                    f"Lasso point {n} — click more, click start, or Enter to finish "
+                    f"(need ≥{MIN_VERTICES})."
+                )
+                self.update()
+            return
+
+        super().mouseReleaseEvent(event)
+
+    def _finish_click_lasso(self) -> bool:
+        """Commit the multi-click lasso if it has ≥3 points. Returns True if handled."""
+        if self.mode != "lasso":
+            return False
+        if len(self._lasso) < MIN_VERTICES:
+            if self._lasso:
+                self.statusMessage.emit(
+                    f"Need ≥{MIN_VERTICES} lasso points "
+                    f"({len(self._lasso)} so far). Click start or Enter when ready."
+                )
+                return True
+            return False
+        raw = [[float(x), float(y)] for x, y in self._lasso]
+        self._clear_lasso_state()
+        self.update()
+        self._apply_lasso_delete(raw)
+        return True
+
+    def cancel_lasso_if_any(self) -> bool:
+        """Clear an in-progress lasso. Returns True if there was one."""
+        if self.mode != "lasso":
+            return False
+        if not (
+            self._lasso
+            or self._drawing_lasso
+            or self._lasso_press_img is not None
+        ):
+            return False
+        self._clear_lasso_state()
+        self.statusMessage.emit("Lasso cancelled.")
+        self.update()
+        return True
+
+    def _apply_lasso_delete(self, lasso: list[list[float]]) -> None:
+        pts = self._selected_points()
+        if pts is None:
+            # Try hit by lasso centroid / first point
+            if lasso:
+                hit = hit_polygon_index(self._polygons, lasso[0][0], lasso[0][1])
+                if hit is not None:
+                    self._selected = hit
+                    self.selectionChanged.emit(hit)
+                    pts = self._selected_points()
+        if pts is None:
+            self.statusMessage.emit("Select a polygon first, then lasso vertices to remove.")
+            return
+        new_pts, n = delete_points_inside(pts, lasso, min_keep=MIN_VERTICES)
+        if n == 0:
+            self.statusMessage.emit(
+                "No vertices removed (need ≥3 left, or none were inside lasso)."
+            )
+            return
+        self._set_selected_points(new_pts)
+        self.statusMessage.emit(
+            f"Lasso removed {n} vertex(es); {len(new_pts)} left. Save when done."
+        )
+        self.update()
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        if event.key() == Qt.Key_F:
+            self.fit_to_polygons()
+            self.statusMessage.emit("Fit view to polygons (+10%).")
+            return
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter) and self.mode == "lasso":
+            self._finish_click_lasso()
+            return
+        if event.key() == Qt.Key_Escape and self.cancel_lasso_if_any():
+            return
+        if event.key() in (Qt.Key_Delete, Qt.Key_Backspace) and self.mode == "edit":
+            # Delete nearest vertex via double-click; whole poly via Del poly / Delete
+            pass
+        if (
+            event.key() == Qt.Key_Backspace
+            and self.mode == "lasso"
+            and self._lasso
+            and not self._drawing_lasso
+        ):
+            self._lasso.pop()
+            self.statusMessage.emit(
+                f"Removed last lasso point ({len(self._lasso)} left)."
+            )
+            self.update()
+            return
+        super().keyPressEvent(event)
+
+    def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
+        """Edit: double-click vertex deletes it. Lasso: double-click finishes (≥3)."""
+        if event.button() != Qt.LeftButton:
+            return super().mouseDoubleClickEvent(event)
+        if self.mode == "lasso":
+            # Consume the second click's press residue, then finish if possible.
+            self._lasso_press_widget = None
+            self._lasso_press_img = None
+            if self._finish_click_lasso():
+                return
+            return super().mouseDoubleClickEvent(event)
+        if self.mode != "edit":
+            return super().mouseDoubleClickEvent(event)
+
+        self._drag_vertex = None
+        if self._selected_is_locked():
+            self.statusMessage.emit(
+                "Polygon is locked — press K to unlock before editing."
+            )
+            return
+
+        pts = self._selected_points()
+        if pts is None:
+            return super().mouseDoubleClickEvent(event)
+
+        ix, iy = self._widget_to_img(event.position().toPoint())
+        vi = nearest_vertex(
+            pts, ix, iy, max_dist=self._hit_radius_img(VERTEX_HIT_PX)
+        )
+        if vi is None:
+            return super().mouseDoubleClickEvent(event)
+
+        new_pts, removed = remove_vertex(pts, vi, min_keep=MIN_VERTICES)
+        if not removed:
+            self.statusMessage.emit(
+                f"Need ≥{MIN_VERTICES} vertices — can't delete this point."
+            )
+            return
+
+        self._set_selected_points(new_pts)
+        self.statusMessage.emit(
+            f"Deleted vertex; {len(new_pts)} left. Save when done."
+        )
+        self.update()
+
+
+class OutlineViewerDialog(QDialog):
+    """Multi-polygon outline editor for selected thumbs."""
+
+    def __init__(
+        self,
+        parent: QWidget | None,
+        entries: list[tuple[Path, str]],
+        start_index: int = 0,
+        display_size: int = DEFAULT_DISPLAY_SIZE,
+        sam_model: str = "sam_b.pt",
+        device: str | None = None,
+    ):
+        super().__init__(parent)
+        self.entries = entries
+        self.index = max(0, min(start_index, len(entries) - 1)) if entries else 0
+        self.display_size = display_size
+        self.sam_model_name = sam_model
+        self.device = device
+        self._sam = None
+        self._polygons: list[dict[str, Any]] = []
+        self._selected: int | None = None
+        self._dirty = False
+        self._img_w = DEFAULT_THUMB_SIZE
+        self._img_h = DEFAULT_THUMB_SIZE
+        self._src_pix = QPixmap()
+
+        self.setWindowTitle("Outline viewer")
+        self.resize(display_size + 100, display_size + 240)
+
+        layout = QVBoxLayout(self)
+
+        self.title_label = QLabel("")
+        self.title_label.setWordWrap(True)
+        title_font = QFont()
+        title_font.setBold(True)
+        self.title_label.setFont(title_font)
+        layout.addWidget(self.title_label)
+
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel("Tool:"))
+        self.mode_group = QButtonGroup(self)
+        self.radio_edit = QRadioButton("Edit")
+        self.radio_add = QRadioButton("Add point")
+        self.radio_lasso = QRadioButton("Lasso (−pts)")
+        self.radio_eraser = QRadioButton("Eraser")
+        self.radio_point = QRadioButton("SAM +")
+        self.radio_box = QRadioButton("SAM box +")
+        self.radio_delete = QRadioButton("Del poly")
+        self.radio_view = QRadioButton("Pan")
+        self.radio_edit.setChecked(True)
+        for btn in (
+            self.radio_edit,
+            self.radio_add,
+            self.radio_lasso,
+            self.radio_eraser,
+            self.radio_point,
+            self.radio_box,
+            self.radio_delete,
+            self.radio_view,
+        ):
+            self.mode_group.addButton(btn)
+            mode_row.addWidget(btn)
+            btn.toggled.connect(self._on_mode_changed)
+        mode_row.addStretch()
+        layout.addLayout(mode_row)
+
+        self.canvas = OutlineCanvas()
+        self.canvas.setMinimumSize(display_size, display_size)
+        self.canvas.pointSeeded.connect(self._on_point_seed)
+        self.canvas.boxSeeded.connect(self._on_box_seed)
+        self.canvas.polygonsChanged.connect(self._on_canvas_polys_changed)
+        self.canvas.statusMessage.connect(self._set_status)
+        self.canvas.selectionChanged.connect(self._on_selection_changed)
+        layout.addWidget(self.canvas, stretch=1)
+
+        self.status_label = QLabel("")
+        self.status_label.setWordWrap(True)
+        layout.addWidget(self.status_label)
+
+        nav = QHBoxLayout()
+        self.prev_btn = QPushButton("← Prev")
+        self.prev_btn.clicked.connect(self.show_prev)
+        nav.addWidget(self.prev_btn)
+
+        self.next_btn = QPushButton("Next →")
+        self.next_btn.clicked.connect(self.show_next)
+        nav.addWidget(self.next_btn)
+
+        self.fit_btn = QPushButton("Fit")
+        self.fit_btn.clicked.connect(self._fit_view)
+        nav.addWidget(self.fit_btn)
+
+        self.lock_btn = QPushButton("Lock good (K)")
+        self.lock_btn.clicked.connect(self.toggle_lock_selected)
+        nav.addWidget(self.lock_btn)
+
+        self.sam_boxes_btn = QPushButton("SAM from boxes")
+        self.sam_boxes_btn.setToolTip(
+            "Run SAM on imported turtle_box rectangles (yolo_finds / slices)"
+        )
+        self.sam_boxes_btn.clicked.connect(self.sam_from_imported_boxes)
+        nav.addWidget(self.sam_boxes_btn)
+
+        self.del_btn = QPushButton("Delete selected")
+        self.del_btn.clicked.connect(self.delete_selected)
+        nav.addWidget(self.del_btn)
+
+        self.save_btn = QPushButton("Save")
+        self.save_btn.clicked.connect(self.save_current)
+        nav.addWidget(self.save_btn)
+
+        self.save_next_btn = QPushButton("Save & Next")
+        self.save_next_btn.clicked.connect(self.save_and_next)
+        nav.addWidget(self.save_next_btn)
+
+        nav.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        nav.addWidget(close_btn)
+        layout.addLayout(nav)
+
+        self._install_shortcuts()
+
+        if not self.entries:
+            self.title_label.setText("No images to show")
+            self.status_label.setText("Select a thumb in the grid first.")
+            self.prev_btn.setEnabled(False)
+            self.next_btn.setEnabled(False)
+            self.save_btn.setEnabled(False)
+            self.save_next_btn.setEnabled(False)
+            self.lock_btn.setEnabled(False)
+        else:
+            self._on_mode_changed()
+            self.refresh()
+
+    def _bind_shortcut(self, key: str, slot) -> QShortcut:
+        sc = QShortcut(QKeySequence(key), self)
+        sc.setContext(Qt.WidgetWithChildrenShortcut)
+        sc.activated.connect(slot)
+        return sc
+
+    def _install_shortcuts(self) -> None:
+        """Tool + nav shortcuts work even when the canvas has focus."""
+        # Tools (match grid where possible)
+        self._bind_shortcut("E", lambda: self._select_tool(self.radio_edit))
+        self._bind_shortcut("A", lambda: self._select_tool(self.radio_add))
+        self._bind_shortcut("L", lambda: self._select_tool(self.radio_lasso))
+        self._bind_shortcut("R", lambda: self._select_tool(self.radio_eraser))
+        self._bind_shortcut("P", lambda: self._select_tool(self.radio_point))
+        self._bind_shortcut("B", lambda: self._select_tool(self.radio_box))
+        self._bind_shortcut("D", lambda: self._select_tool(self.radio_delete))
+        self._bind_shortcut("H", lambda: self._select_tool(self.radio_view))
+        # Lock / nav / save
+        self._bind_shortcut("K", self.toggle_lock_selected)
+        self._bind_shortcut("Shift+K", lambda: self.toggle_lock_selected(force_unlock=True))
+        self._bind_shortcut("S", self.sam_from_imported_boxes)
+        self._bind_shortcut("F", self._fit_view)
+        self._bind_shortcut("Left", self.show_prev)
+        self._bind_shortcut("Right", self.show_next)
+        self._bind_shortcut("Ctrl+S", self.save_current)
+        self._bind_shortcut("Ctrl+Return", self.save_and_next)
+        self._bind_shortcut("Ctrl+Enter", self.save_and_next)
+        self._bind_shortcut("N", self.save_and_next)
+        self._bind_shortcut("Delete", self.delete_selected)
+        self._bind_shortcut("Backspace", self.delete_selected)
+        self._bind_shortcut("Return", self._enter_or_finish_lasso)
+        self._bind_shortcut("Enter", self._enter_or_finish_lasso)
+        self._bind_shortcut("Esc", self._escape_or_close)
+
+    def _enter_or_finish_lasso(self) -> None:
+        """Enter finishes a click-lasso; otherwise ignored (Ctrl+Enter is Save&Next)."""
+        if self.canvas.mode == "lasso" and self.canvas._finish_click_lasso():
+            return
+
+    def _escape_or_close(self) -> None:
+        if self.canvas.cancel_lasso_if_any():
+            return
+        self.accept()
+
+    def _select_tool(self, radio: QRadioButton) -> None:
+        radio.setChecked(True)
+        self._on_mode_changed()
+        self.canvas.setFocus(Qt.ShortcutFocusReason)
+
+    def _set_status(self, text: str) -> None:
+        self.status_label.setText(text)
+
+    def _on_mode_changed(self) -> None:
+        tips = {
+            self.radio_edit: (
+                "edit",
+                "Click vertex to drag · click edge to insert (+drag) · "
+                "double-click vertex to delete · fill off for clarity · "
+                "Alt/right-drag pan · wheel zoom",
+            ),
+            self.radio_add: (
+                "add_point",
+                "Click near an edge (or anywhere on selected poly) to insert a vertex. "
+                "Fill off while editing.",
+            ),
+            self.radio_lasso: (
+                "lasso",
+                "Drag freehand OR click vertices; click start / Enter to finish. "
+                "Deletes verts INSIDE (keeps ≥3). Esc cancels.",
+            ),
+            self.radio_eraser: (
+                "eraser",
+                "Brush-erase vertices under the cursor (keeps ≥3).",
+            ),
+            self.radio_point: ("point", "Click to ADD a SAM polygon (multi-turtle OK)."),
+            self.radio_box: ("box", "Drag a box to ADD a SAM polygon."),
+            self.radio_delete: ("delete", "Click a polygon to delete the whole shape."),
+            self.radio_view: ("view", "Drag to pan. Wheel zooms around pointer. F = fit."),
+        }
+        for radio, (mode, tip) in tips.items():
+            if radio.isChecked():
+                self.canvas.set_mode(mode)
+                if self.entries:
+                    self.status_label.setText(tip)
+                break
+
+    def _fit_view(self) -> None:
+        self.canvas.fit_to_polygons()
+        self.status_label.setText("Fit view to polygons (+10% pad). Wheel zooms at pointer.")
+
+    def _ensure_sam(self) -> Any:
+        if self._sam is None:
+            self.status_label.setText(f"Loading SAM ({self.sam_model_name})…")
+            self.repaint()
+            self._sam = load_sam_model(self.sam_model_name, device=self.device)
+        return self._sam
+
+    def _current_paths(self) -> tuple[Path, str]:
+        return self.entries[self.index]
+
+    def _confirm_leave_if_dirty(self) -> bool:
+        if not self._dirty:
+            return True
+        ans = QMessageBox.question(
+            self,
+            "Unsaved outline",
+            "Save polygon changes before leaving?",
+            QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
+        )
+        if ans == QMessageBox.Cancel:
+            return False
+        if ans == QMessageBox.Save:
+            return self.save_current()
+        self._dirty = False
+        return True
+
+    def show_prev(self) -> None:
+        if not self.entries or not self._confirm_leave_if_dirty():
+            return
+        if len(self.entries) <= 1:
+            return
+        self.index = (self.index - 1) % len(self.entries)
+        self._sync_browser_to_current()
+        self.refresh()
+
+    def show_next(self) -> None:
+        if not self.entries or not self._confirm_leave_if_dirty():
+            return
+        if not self._advance_index(skip_done=False):
+            return
+        self._sync_browser_to_current()
+        self.refresh()
+
+    def _push_scene(self, *, refit: bool) -> None:
+        self.canvas.set_scene(
+            self._src_pix,
+            self._polygons,
+            selected_index=self._selected,
+            image_width=self._img_w,
+            image_height=self._img_h,
+            refit=refit,
+        )
+
+    def _on_canvas_polys_changed(self) -> None:
+        self._dirty = True
+        # polygons already mutated in-place on the shared list
+        self._update_title()
+
+    def _on_selection_changed(self, index: object) -> None:
+        self._selected = index if isinstance(index, int) else None
+        self._update_title()
+
+    def _update_title(self) -> None:
+        if not self.entries:
+            return
+        _, display_name = self._current_paths()
+        sel = ""
+        if self._selected is not None and 0 <= self._selected < len(self._polygons):
+            lock = " locked" if is_polygon_locked(self._polygons[self._selected]) else ""
+            sel = f", selected #{self._selected + 1}{lock}"
+        n_locked = sum(1 for p in self._polygons if is_polygon_locked(p))
+        dirty = " *" if self._dirty else ""
+        self.title_label.setText(
+            f"{self.index + 1}/{len(self.entries)}  —  {display_name}  "
+            f"({len(self._polygons)} poly, {n_locked} locked{sel}){dirty}"
+        )
+        if self._selected is not None and 0 <= self._selected < len(self._polygons):
+            if is_polygon_locked(self._polygons[self._selected]):
+                self.lock_btn.setText("Unlock (K)")
+            else:
+                self.lock_btn.setText("Lock good (K)")
+        else:
+            self.lock_btn.setText("Lock good (K)")
+
+    def refresh(self) -> None:
+        thumb_path, display_name = self._current_paths()
+        data = load_labelme_json(labelme_path_for_thumb(thumb_path))
+        self._polygons = extract_polygons(data)
+        self._selected = len(self._polygons) - 1 if self._polygons else None
+        self._dirty = False
+
+        if not thumb_path.exists():
+            self._src_pix = QPixmap()
+            self._img_w = 1
+            self._img_h = 1
+            self._push_scene(refit=True)
+            self.status_label.setText(f"Missing image: {thumb_path}")
+            self._update_title()
+            return
+
+        self._src_pix = QPixmap(str(thumb_path))
+        self._img_w = self._src_pix.width() or DEFAULT_THUMB_SIZE
+        self._img_h = self._src_pix.height() or DEFAULT_THUMB_SIZE
+        self._push_scene(refit=True)
+        self._on_mode_changed()
+        self._update_title()
+        self.prev_btn.setEnabled(len(self.entries) > 1)
+        self.next_btn.setEnabled(len(self.entries) > 1)
+        tip = (
+            "Wheel = zoom at pointer · F = fit (+10%) · Alt/right-drag = pan · "
+            "Edit = drag vertices"
+        )
+        self.status_label.setText(tip)
+
+    def _on_point_seed(self, x: float, y: float) -> None:
+        thumb_path, _ = self._current_paths()
+        try:
+            draft = sam_polygon(
+                thumb_path,
+                model=self._ensure_sam(),
+                points=[[x, y]],
+                point_labels=[1],
+                device=self.device,
+                sam_model=self.sam_model_name,
+            )
+            self._polygons.append(
+                {
+                    "label": "turtle",
+                    "points": draft.points,
+                    "flags": dict(draft.flags),
+                    "shape_type": "polygon",
+                }
+            )
+            self._selected = len(self._polygons) - 1
+            self._dirty = True
+            self._push_scene(refit=False)
+            self.canvas.set_selected(self._selected)
+            self._update_title()
+            self.status_label.setText(
+                f"Added SAM polygon ({len(self._polygons)} total). Save when done."
+            )
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "SAM failed", str(exc))
+
+    def _on_box_seed(self, x1: float, y1: float, x2: float, y2: float) -> None:
+        thumb_path, _ = self._current_paths()
+        try:
+            draft = sam_polygon(
+                thumb_path,
+                model=self._ensure_sam(),
+                bboxes=[x1, y1, x2, y2],
+                device=self.device,
+                sam_model=self.sam_model_name,
+            )
+            self._polygons.append(
+                {
+                    "label": "turtle",
+                    "points": draft.points,
+                    "flags": dict(draft.flags),
+                    "shape_type": "polygon",
+                }
+            )
+            self._selected = len(self._polygons) - 1
+            self._dirty = True
+            self._push_scene(refit=False)
+            self.canvas.set_selected(self._selected)
+            self._update_title()
+            self.status_label.setText(
+                f"Added SAM polygon ({len(self._polygons)} total). Save when done."
+            )
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "SAM failed", str(exc))
+
+    def delete_selected(self) -> None:
+        if self._selected is None or not self._polygons:
+            if not self._polygons:
+                return
+            self._selected = len(self._polygons) - 1
+        if is_polygon_locked(self._polygons[self._selected]):
+            self.status_label.setText("Polygon is locked — unlock (K) before deleting.")
+            return
+        self._polygons.pop(self._selected)
+        self._selected = (
+            min(self._selected, len(self._polygons) - 1) if self._polygons else None
+        )
+        self._dirty = True
+        self._push_scene(refit=False)
+        self.canvas.set_selected(self._selected)
+        self._update_title()
+        self.status_label.setText(
+            f"Deleted. {len(self._polygons)} polygon(s) left. Save when done."
+        )
+
+    def sam_from_imported_boxes(self) -> None:
+        """Run SAM on sibling ``turtle_box`` rectangles (turtledrone segment.py pattern)."""
+        if not self.entries:
+            return
+        thumb_path, _ = self._current_paths()
+        rects = extract_rectangles(load_labelme_json(labelme_path_for_thumb(thumb_path)))
+        if not rects:
+            self.status_label.setText(
+                "No turtle_box rectangles — run: symsorter outline-import-boxes …"
+            )
+            return
+        try:
+            model = self._ensure_sam()
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "SAM failed", str(exc))
+            return
+        added = 0
+        for rect in rects:
+            (x1, y1), (x2, y2) = rect["points"]
+            try:
+                draft = sam_polygon(
+                    thumb_path,
+                    model=model,
+                    bboxes=[x1, y1, x2, y2],
+                    device=self.device,
+                    sam_model=self.sam_model_name,
+                )
+                flags = dict(draft.flags)
+                flags["source"] = "yolo_box_sam"
+                flags["draft"] = True
+                self._polygons.append(
+                    {
+                        "label": "turtle",
+                        "points": draft.points,
+                        "flags": flags,
+                        "shape_type": "polygon",
+                    }
+                )
+                added += 1
+            except Exception as exc:  # noqa: BLE001
+                self.status_label.setText(f"SAM box failed: {exc}")
+        if added:
+            self._selected = len(self._polygons) - 1
+            self._dirty = True
+            self._push_scene(refit=False)
+            self.canvas.set_selected(self._selected)
+            self._update_title()
+            self.status_label.setText(
+                f"SAM added {added} polygon(s) from boxes. Save when done."
+            )
+
+    def toggle_lock_selected(self, force_unlock: bool = False) -> None:
+        """Mark selected polygon quality-good (locked) and auto-save LabelMe JSON."""
+        if self._selected is None or not self._polygons:
+            if not self._polygons:
+                self.status_label.setText("No polygon to lock.")
+                return
+            self._selected = len(self._polygons) - 1
+        poly = self._polygons[self._selected]
+        locking = not (force_unlock or is_polygon_locked(poly))
+        if locking:
+            set_polygon_locked(poly, True)
+            note = (
+                f"Locked polygon #{self._selected + 1} as quality=good "
+                "(auto-saved). Sort grid with Shift+W for remaining work."
+            )
+        else:
+            set_polygon_locked(poly, False)
+            note = (
+                f"Unlocked polygon #{self._selected + 1} "
+                "(editable again, auto-saved)."
+            )
+        self._dirty = True
+        self._push_scene(refit=False)
+        self.canvas.set_selected(self._selected)
+        self._update_title()
+        if self.save_current():
+            self.status_label.setText(note)
+        else:
+            self.status_label.setText(note + " Save failed.")
+
+    def _advance_index(self, *, skip_done: bool = True) -> bool:
+        """Move ``self.index`` forward. Prefer unlocked/empty thumbs when skipping."""
+        n = len(self.entries)
+        needs = None
+        if skip_done:
+            needs = [thumb_needs_outline_work(p) for p, _ in self.entries]
+        nxt = next_index(
+            self.index, n, needs_work=needs, skip_done=skip_done
+        )
+        if nxt is None:
+            return False
+        self.index = nxt
+        return True
+
+    def _sync_browser_to_current(self) -> None:
+        """Keep the grid selection/current item aligned with the viewer."""
+        parent = self.parent()
+        if parent is None or not self.entries:
+            return
+        view = getattr(parent, "view", None)
+        model = getattr(parent, "model", None)
+        if view is None or model is None:
+            return
+        fn = self.entries[self.index][1]
+        for row in range(model.rowCount()):
+            item = model.item(row)
+            if item is None:
+                continue
+            if item.data(Qt.UserRole) == fn:
+                index = model.indexFromItem(item)
+                view.setCurrentIndex(index)
+                view.scrollTo(index)
+                break
+
+    def save_and_next(self) -> None:
+        """Save current outlines, then advance to the next thumb that needs work."""
+        if not self.entries:
+            return
+        if not self.save_current():
+            return
+        if len(self.entries) <= 1:
+            self.status_label.setText("Saved. (Only one image loaded in the grid.)")
+            return
+        prev_name = self.entries[self.index][1]
+        self._advance_index(skip_done=True)
+        self._sync_browser_to_current()
+        self.refresh()
+        cur_name = self.entries[self.index][1]
+        self.status_label.setText(
+            f"Saved {prev_name} → now {self.index + 1}/{len(self.entries)}: {cur_name}"
+        )
+
+    def save_current(self) -> bool:
+        if not self.entries:
+            return False
+        thumb_path, _ = self._current_paths()
+        parsed = parse_thumb_filename(thumb_path.name)
+        polys = []
+        for poly in self._polygons:
+            flags = dict(poly.get("flags") or {})
+            flags["det_index"] = parsed.det_index
+            flags.setdefault("turtle_group_id", None)
+            flags.setdefault("draft", True)
+            polys.append(
+                {
+                    "label": "turtle",
+                    "points": poly["points"],
+                    "flags": flags,
+                    "shape_type": "polygon",
+                }
+            )
+        set_turtle_polygons(
+            labelme_path_for_thumb(thumb_path),
+            polys,
+            image_path=thumb_path.name,
+            image_height=self._img_h,
+            image_width=self._img_w,
+        )
+        self._dirty = False
+        self._update_title()
+        self.status_label.setText(
+            f"Saved {len(polys)} turtle polygon(s) → {thumb_path.with_suffix('.json').name}"
+        )
+        parent = self.parent()
+        if parent is not None and hasattr(parent, "refresh_outline_icon"):
+            parent.refresh_outline_icon(thumb_path.name)
+        return True
+
+
+def open_outline_viewer_for_browser(browser: QWidget) -> None:
+    """Open outline viewer over the current grid order (for Save & Next).
+
+    - **Multi-select (≥2)**: edit just that selection.
+    - **Otherwise**: walk ``browser.image_files`` (respects Shift+W sort), starting
+      at the current/selected thumb so ``N`` / Save & Next advances through the set.
+    """
+    folder = getattr(browser, "folder", "") or ""
+    if not folder:
+        QMessageBox.information(
+            browser,
+            "Outline viewer",
+            "Open a folder or embeddings NPZ first.",
+        )
+        return
+
+    folder_path = Path(folder)
+    view = getattr(browser, "view", None)
+    if view is None:
+        return
+
+    selected: list[str] = []
+    for index in view.selectedIndexes():
+        fn = index.data(Qt.UserRole)
+        if fn and fn not in selected:
+            selected.append(fn)
+
+    current_fn: str | None = None
+    current = view.currentIndex()
+    if current.isValid():
+        current_fn = current.data(Qt.UserRole)
+    if current_fn is None and selected:
+        current_fn = selected[0]
+
+    grid_files = [
+        fn for fn in (getattr(browser, "image_files", None) or []) if fn
+    ]
+
+    if len(selected) >= 2:
+        filenames = selected
+        start_index = 0
+    elif grid_files:
+        filenames = grid_files
+        start_index = (
+            filenames.index(current_fn) if current_fn in filenames else 0
+        )
+    elif current_fn:
+        filenames = [current_fn]
+        start_index = 0
+    elif selected:
+        filenames = selected
+        start_index = 0
+    else:
+        QMessageBox.information(
+            browser,
+            "Outline viewer",
+            "Select a thumb in the grid (or load images), then press O.",
+        )
+        return
+
+    entries: list[tuple[Path, str]] = [(folder_path / fn, fn) for fn in filenames]
+    dlg = OutlineViewerDialog(browser, entries=entries, start_index=start_index)
+    dlg.exec()

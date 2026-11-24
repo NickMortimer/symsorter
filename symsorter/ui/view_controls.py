@@ -28,9 +28,9 @@ class ViewControlsMixin:
     def ensure_view_defaults(self):
         """Initialize all view-related defaults used by menus and loaders."""
         if not hasattr(self, "icon_sizes"):
-            self.icon_sizes = {"Small": 96, "Medium": 128, "Large": 160, "XL": 196}
+            self.icon_sizes = {"Small": 96, "Medium": 128, "Large": 160, "XL": 224, "XXL": 336}
         if not hasattr(self, "current_size_name"):
-            self.current_size_name = "Medium"
+            self.current_size_name = "XL"
         if not hasattr(self, "icon_size"):
             self.icon_size = int(self.icon_sizes.get(self.current_size_name, 128))
 
@@ -164,9 +164,9 @@ class ViewControlsMixin:
 
     # Thumbnail size handlers
     def increase_thumbnail_size(self):
-        sizes = getattr(self, "icon_sizes", {"Small": 96, "Medium": 128, "Large": 160, "XL": 196})
+        sizes = getattr(self, "icon_sizes", {"Small": 96, "Medium": 128, "Large": 160, "XL": 224, "XXL": 336})
         order = list(sizes.keys())
-        cur = getattr(self, "current_size_name", "Medium")
+        cur = getattr(self, "current_size_name", "XL")
         i = order.index(cur) if cur in order else 1
         if i < len(order) - 1:
             self.current_size_name = order[i + 1]
@@ -177,9 +177,9 @@ class ViewControlsMixin:
                 self.update_class_info_label()
 
     def decrease_thumbnail_size(self):
-        sizes = getattr(self, "icon_sizes", {"Small": 96, "Medium": 128, "Large": 160, "XL": 196})
+        sizes = getattr(self, "icon_sizes", {"Small": 96, "Medium": 128, "Large": 160, "XL": 224, "XXL": 336})
         order = list(sizes.keys())
-        cur = getattr(self, "current_size_name", "Medium")
+        cur = getattr(self, "current_size_name", "XL")
         i = order.index(cur) if cur in order else 1
         if i > 0:
             self.current_size_name = order[i - 1]
@@ -192,7 +192,7 @@ class ViewControlsMixin:
     def create_size_handler(self, size_name: str):
         """Return a callable for menu actions to set a specific thumbnail size."""
         def handler():
-            sizes = getattr(self, "icon_sizes", {"Small": 96, "Medium": 128, "Large": 160, "XL": 196})
+            sizes = getattr(self, "icon_sizes", {"Small": 96, "Medium": 128, "Large": 160, "XL": 224, "XXL": 336})
             if size_name in sizes:
                 self.current_size_name = size_name
                 self.icon_size = sizes[size_name]

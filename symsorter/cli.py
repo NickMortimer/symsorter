@@ -167,6 +167,9 @@ from .commands.prepare_dataset import (
     prepare_dataset_command,
     update_json_from_symsorter_command,
 )
+from .commands.outline_draft import outline_draft_command
+from .commands.outline_import_boxes import outline_import_boxes_command
+from .commands.remap_sorted_npz import remap_sorted_npz_command
 
 @app.command(name="sort")
 def sort(
@@ -217,6 +220,199 @@ def update_json(
         source_root=source_root,
         replace_label=replace_label,
     )
+
+
+@app.command(name="outline-draft")
+def outline_draft(
+    thumbs: Path = typer.Option(
+        ...,
+        "--thumbs",
+        help="Root of sorted shards (…/sorted or a single class folder)",
+    ),
+    out: Path = typer.Option(
+        None,
+        "--out",
+        help="Optional directory for manifest.jsonl (LabelMe JSON is written beside each thumb)",
+    ),
+    classes: str = typer.Option(
+        "turtle-surface,turtle-deep",
+        "--classes",
+        help="Comma-separated class folder names to include",
+    ),
+    backend: str = typer.Option(
+        "sam",
+        "--backend",
+        help="Draft backend: sam (Ultralytics SAM, default), box, or threshold",
+    ),
+    sam_model: str = typer.Option(
+        "sam_b.pt",
+        "--sam-model",
+        help="Ultralytics SAM weights (used when --backend sam)",
+    ),
+    device: str = typer.Option(
+        None,
+        "--device",
+        help="Torch device for SAM (e.g. cpu, mps, cuda:0); default is Ultralytics auto",
+    ),
+    limit: int = typer.Option(
+        None,
+        "--limit",
+        help="Process only the first N thumbs (smoke runs)",
+    ),
+    overwrite: bool = typer.Option(
+        False,
+        "--overwrite",
+        help="Replace existing LabelMe JSON beside thumbs (skips by default)",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Enumerate only; print counts; write nothing",
+    ),
+):
+    """Generate draft turtle polygons beside sorted 224×224 thumbs (no yolo_finds)."""
+    return outline_draft_command(
+        thumbs=thumbs,
+        out=out,
+        classes=classes,
+        backend=backend,
+        limit=limit,
+        overwrite=overwrite,
+        dry_run=dry_run,
+        sam_model=sam_model,
+        device=device,
+    )
+
+
+@app.command(name="outline-import-boxes")
+def outline_import_boxes(
+    thumbs: Path = typer.Option(
+        ...,
+        "--thumbs",
+        help="Root of sorted shards (…/sorted or a single class folder)",
+    ),
+    yolo_finds: Path = typer.Option(
+        ...,
+        "--yolo-finds",
+        help="yolo_finds root with {FLIGHT}/images and/or slices",
+    ),
+    metadata_root: Path = typer.Option(
+        None,
+        "--metadata-root",
+        help="Optional root of *_crops_metadata.csv (Timor2 turtle_v01_run02)",
+    ),
+    classes: str = typer.Option(
+        "turtle-surface,turtle-deep",
+        "--classes",
+        help="Comma-separated class folder names to include",
+    ),
+    limit: int = typer.Option(
+        None,
+        "--limit",
+        help="Process only the first N thumbs (smoke runs)",
+    ),
+    overwrite: bool = typer.Option(
+        False,
+        "--overwrite",
+        help="Replace existing turtle_box rectangles beside thumbs",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Match only; write nothing",
+    ),
+    run_sam: bool = typer.Option(
+        False,
+        "--sam/--no-sam",
+        help="After importing boxes, run SAM on each box (turtledrone segment.py pattern)",
+    ),
+    sam_model: str = typer.Option(
+        "sam_b.pt",
+        "--sam-model",
+        help="Ultralytics SAM weights when --sam is set",
+    ),
+    device: str = typer.Option(
+        None,
+        "--device",
+        help="Torch device for SAM (cpu, mps, cuda:0)",
+    ),
+    min_match_score: float = typer.Option(
+        0.5,
+        "--min-match-score",
+        help="Minimum cv2.matchTemplate score when metadata is unavailable",
+    ),
+    out: Path = typer.Option(
+        None,
+        "--out",
+        help="Optional directory for import_boxes_manifest.jsonl",
+    ),
+):
+    """Copy YOLO/slice boxes onto sorted 224 thumbs (for SAM prompts)."""
+    return outline_import_boxes_command(
+        thumbs=thumbs,
+        yolo_finds=yolo_finds,
+        metadata_root=metadata_root,
+        classes=classes,
+        limit=limit,
+        overwrite=overwrite,
+        dry_run=dry_run,
+        run_sam=run_sam,
+        sam_model=sam_model,
+        device=device,
+        min_match_score=min_match_score,
+        out=out,
+    )
+
+
+@app.command(name="remap-npz")
+def remap_npz(
+    thumbs: Path = typer.Option(
+        ...,
+        "--thumbs",
+        help="Sorted root (…/sorted), a class folder, or a single shard_* folder",
+    ),
+    source: Path = typer.Option(
+        ...,
+        "--source",
+        help="Root of original crop trees containing encoding_*.npz (e.g. turtle_v01_run02)",
+    ),
+    npz_name: str = typer.Option(
+        "encoding_dinov3_224.npz",
+        "--npz-name",
+        help="NPZ basename to read from source and write into each sorted shard",
+    ),
+    classes: str = typer.Option(
+        "turtle-surface,turtle-deep",
+        "--classes",
+        help="Comma-separated class folders under --thumbs",
+    ),
+    overwrite: bool = typer.Option(
+        False,
+        "--overwrite",
+        help="Replace existing NPZ files in sorted shards",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Index and report match counts; write nothing",
+    ),
+    limit_shards: int = typer.Option(
+        None,
+        "--limit-shards",
+        help="Only process the first N shards (smoke runs)",
+    ),
+):
+    """Rebuild per-shard NPZs in sorted/ by joining original crop embeddings on filename."""
+    return remap_sorted_npz_command(
+        thumbs=thumbs,
+        source=source,
+        npz_name=npz_name,
+        classes=classes,
+        overwrite=overwrite,
+        dry_run=dry_run,
+        limit_shards=limit_shards,
+    )
+
 
 def main():
     """Main entry point for symsorter CLI"""
