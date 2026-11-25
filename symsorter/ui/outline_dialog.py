@@ -40,6 +40,7 @@ from symsorter.outline.edit_geom import (
     nearest_edge,
     nearest_vertex,
     next_index,
+    point_in_poly,
     remove_vertex,
     zoom_at_pointer,
 )
@@ -121,6 +122,9 @@ class OutlineCanvas(QWidget):
         self._img_h = DEFAULT_THUMB_SIZE
         self._polygons: list[dict[str, Any]] = []
         self._selected: int | None = None
+        self._overlays: list[list[list[float]]] = []
+        self._crop_rect: tuple[float, float, float, float] | None = None
+        self._message: str | None = None
 
         self._zoom = 1.0
         self._ox = 0.0
@@ -181,6 +185,21 @@ class OutlineCanvas(QWidget):
 
     def set_selected(self, index: int | None) -> None:
         self._selected = index
+        self.update()
+
+    def set_overlays(self, polys: list[list[list[float]]]) -> None:
+        """Store read-only overlay polygons in image pixels and repaint."""
+        self._overlays = polys
+        self.update()
+
+    def set_crop_rect(self, rect: tuple[float, float, float, float] | None) -> None:
+        """Store a dashed crop rectangle (l, t, r, b) in image pixels and repaint."""
+        self._crop_rect = rect
+        self.update()
+
+    def set_message(self, text: str | None) -> None:
+        """Show this text instead of 'No image' when no pixmap is loaded."""
+        self._message = text
         self.update()
 
     def fit_to_polygons(self) -> None:
@@ -258,7 +277,8 @@ class OutlineCanvas(QWidget):
         painter.fillRect(self.rect(), QColor(28, 28, 32))
         if self._src is None or self._src.isNull():
             painter.setPen(QColor(180, 180, 180))
-            painter.drawText(self.rect(), Qt.AlignCenter, "No image")
+            text = "No image" if self._message is None else self._message
+            painter.drawText(self.rect(), Qt.AlignCenter, text)
             painter.end()
             return
 
@@ -272,6 +292,27 @@ class OutlineCanvas(QWidget):
             self._img_h * self._zoom,
         )
         painter.drawPixmap(target, self._src, QRectF(self._src.rect()))
+
+        # Read-only neighbour outlines: dimmed, never filled, never hit-tested.
+        for pts in self._overlays:
+            if len(pts) < 2:
+                continue
+            painter.setPen(QPen(QColor(230, 230, 230, 120), 1.5))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawPolygon(
+                QPolygonF([self._img_to_widget(float(p[0]), float(p[1])) for p in pts])
+            )
+
+        if self._crop_rect is not None:
+            left, top, right, bottom = self._crop_rect
+            painter.setPen(QPen(QColor(220, 220, 230, 200), 1.5, Qt.DashLine))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRect(
+                QRectF(
+                    self._img_to_widget(left, top),
+                    self._img_to_widget(right, bottom),
+                ).normalized()
+            )
 
         for i, shape in enumerate(self._polygons):
             pts = shape.get("points") or []
@@ -400,6 +441,10 @@ class OutlineCanvas(QWidget):
         if self.mode == "delete":
             hit = hit_polygon_index(self._polygons, ix, iy)
             if hit is not None:
+                # Nearest-centroid fallback must not delete a shape the click missed.
+                pts = self._polygons[hit].get("points") or []
+                if len(pts) < 3 or not point_in_poly(ix, iy, pts):
+                    return
                 if is_polygon_locked(self._polygons[hit]):
                     self.statusMessage.emit(
                         "Polygon is locked — unlock (K) before deleting."
