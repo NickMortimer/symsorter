@@ -122,7 +122,10 @@ Available commands:
 
 - `gui`
   - Launch GUI.
-  - Options: `--embeddings-file`, `--class-file`
+  - Options: `--embeddings-file`, `--class-file`, `--survey-root` (repeatable; saved as the frame panel's survey roots)
+
+- `outline-export-frames`
+  - Write locked thumb outlines onto the original survey frames. See [Outlines on original frames](#outlines-on-original-frames).
 
 - `similarity EMBEDDINGS_FILE QUERY_IMAGE`
   - Find nearest images to a query image embedding.
@@ -226,6 +229,49 @@ symsorter outline-import-boxes \
 # optional: --sam   or press S in the Outline viewer
 ```
 
+### Outlines on original frames
+
+`outline-export-frames` writes locked turtle polygons from 224×224 thumbs onto the original survey frames. The thumbnail JSON stays the only file that is edited; frame JSON in the output folder is generated and may be overwritten.
+
+```bash
+symsorter outline-export-frames \
+  --thumbs /Volumes/turtle_apfs/training/surface \
+  --thumbs /Volumes/turtle_apfs/training/deep \
+  --survey-root /Volumes/turtle_apfs/yolo_finds \
+  --survey-root /Volumes/Timor2/surveys \
+  --roi-csv /Volumes/turtle_apfs/training/thumb_roi.csv \
+  --out /Volumes/turtle_apfs/outlines_on_frames
+# optional:
+#   --link hard|sym|copy   # default hard; falls back to sym when source and output are on different volumes
+#   --overwrite            # without it, an existing frame JSON is left alone (skipped_existing)
+#   --dry-run --limit N
+```
+
+Output layout:
+
+```text
+out/
+  {FLIGHT}/
+    {stem}.JPG        # hardlink (or symlink/copy) of the original
+    {stem}.json       # LabelMe 5.0.1, imagePath "{stem}.JPG", real width/height
+  manifest.jsonl      # one row per thumbnail: thumb, view, flight, stem,
+                      # crop [l,t,r,b], crop_method, n_locked, status, frame_src
+  summary.json        # counts by status and view
+```
+
+Each thumbnail is counted in `manifest.jsonl`. Status values:
+
+- `ok`
+- `no_locked`
+- `no_roi_row` (no CSV row, or a row whose `status` is not `ok`; there is no template-match fallback)
+- `frame_missing`
+- `skipped_existing`
+- `link_failed`
+
+`--link` defaults to `hard`. A hardlink across volumes fails with `EXDEV`, and the command falls back to a symlink. `sym` and `copy` do not fall back.
+
+In the Outline viewer, **Shift+F** (or the Frame button) opens the original-frame panel. It is hidden until you toggle it. **File → Set Survey Roots…** saves the survey roots and the ROI CSV. `symsorter gui --survey-root PATH` (repeatable) replaces the saved survey roots before the window opens. The ROI CSV defaults to `thumb_roi.csv` next to the thumbnail folder when the dialog has not set one. If the frame cannot be located, the panel shows `frame_missing` or `no_roi_row` instead of an image.
+
 ### Outline quality notes
 
 - Single class `turtle`. Outline the **animal body** only.
@@ -251,6 +297,7 @@ Common shortcuts:
 - `Shift+Ctrl+=` / `Shift+Ctrl+-`: Crop zoom
 - Double-click image: sort by visual similarity
 - `O`: Outline viewer (see [Outline mode](#outline-mode-turtle-polygons))
+- `Shift+F`: Original-frame panel in the Outline viewer (File → Set Survey Roots…)
 - `Shift+O`: Toggle outline overlays (crop-aware; locked polys draw green)
 - `Shift+W`: Sort by outline needs-work (unlocked/empty first, locked last)
 - `P` / `B` / `D`: In-grid SAM point / box / delete (multi-turtle; Del = last; Shift+Del = clear)

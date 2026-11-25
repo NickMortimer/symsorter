@@ -239,6 +239,12 @@ class ImageBrowser(QMainWindow,
         from .ui.outline_dialog import open_outline_viewer_for_browser
 
         open_outline_viewer_for_browser(self)
+
+    def set_survey_roots_dialog(self):
+        """Save survey roots and the ROI CSV used to locate original frames."""
+        from .ui.frame_settings import edit_frame_settings_dialog
+
+        edit_frame_settings_dialog(self)
     
     def create_class_assignment_handler(self, class_idx):
         """Create a proper closure for class assignment"""

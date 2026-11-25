@@ -444,3 +444,12 @@ def test_shift_f_hidden_by_default(qapp, tmp_path: Path) -> None:
     dialog.frame_btn.clicked.emit()
     assert not dialog.frame_panel.isVisibleTo(dialog)
     dialog.close()
+
+
+def test_gui_help_lists_survey_root():
+    from typer.testing import CliRunner
+
+    from symsorter.cli import app
+
+    r = CliRunner().invoke(app, ["gui", "--help"])
+    assert r.exit_code == 0 and "--survey-root" in r.output

@@ -3,6 +3,7 @@ Command-line interface for SymSorter
 """
 import typer
 from pathlib import Path
+from typing import List
 import sys
 import json
 
@@ -52,7 +53,12 @@ def merge_coco(
 @app.command()
 def gui(
     embeddings_file: Path = typer.Option(None, help="NPZ file with CLIP embeddings to load"),
-    class_file: Path = typer.Option(None, help="Text file with class names (one per line)")
+    class_file: Path = typer.Option(None, help="Text file with class names (one per line)"),
+    survey_root: List[Path] = typer.Option(
+        None,
+        "--survey-root",
+        help="Survey root used to locate original frames (repeatable; replaces saved roots)",
+    ),
 ):
     """
     Launch the SymSorter GUI for image classification and sorting.
@@ -66,6 +72,21 @@ def gui(
             app_qt = QApplication(sys.argv)
         else:
             app_qt = QApplication.instance()
+
+        if survey_root:
+            from .ui.frame_settings import (
+                FrameSettings,
+                load_frame_settings,
+                save_frame_settings,
+            )
+
+            current = load_frame_settings()
+            save_frame_settings(
+                FrameSettings(
+                    survey_roots=list(survey_root),
+                    roi_csv=current.roi_csv,
+                )
+            )
         
         # Create and show the image browser
         browser = ImageBrowser(class_file=str(class_file) if class_file else None)

@@ -63,6 +63,13 @@ def build_menus(window):
     ))
     file_menu.addAction(open_folder_act)
 
+    survey_roots_action = QAction('Set Survey &Roots…', window)
+    survey_roots_action.setStatusTip(
+        'Set survey roots and the ROI CSV used to locate original frames'
+    )
+    survey_roots_action.triggered.connect(lambda: window.set_survey_roots_dialog())
+    file_menu.addAction(survey_roots_action)
+
     # Classes
     classes_menu = menubar.addMenu('&Classes')
     window.classes_menu = classes_menu
