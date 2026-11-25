@@ -9,12 +9,13 @@ from typing import NamedTuple
 
 from PIL import Image
 from PySide6.QtCore import QEvent, QSettings, Qt, QThreadPool
-from PySide6.QtGui import QMouseEvent, QPixmap
+from PySide6.QtGui import QKeySequence, QMouseEvent, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QDialog,
     QLineEdit,
     QPlainTextEdit,
     QPushButton,
+    QSplitter,
 )
 
 from symsorter.outline.export_labelme import extract_polygons, load_labelme_json
@@ -27,7 +28,7 @@ from symsorter.ui.frame_settings import (
     roi_csv_for,
     save_frame_settings,
 )
-from symsorter.ui.outline_dialog import OutlineCanvas
+from symsorter.ui.outline_dialog import OutlineCanvas, OutlineViewerDialog
 
 THUMB = "050_DJIP4_RGB_AU_MANGB_20230503T113703_2116_det_0_turtle_3_224px.jpg"
 DEEP_THUMB = "050_DJIP4_RGB_AU_MANGB_20230503T113703_2116_det_1_turtle_3_224px.jpg"
@@ -354,3 +355,92 @@ def test_edit_frame_settings_dialog_ok_saves_cancel_returns_none(
     assert saved.roi_csv == csv_path
     loaded = load_frame_settings()
     assert loaded.survey_roots == [root] and loaded.roi_csv == csv_path
+
+
+def _outline_dialog(tmp_path: Path) -> tuple[_PanelTree, OutlineViewerDialog]:
+    tree = _panel_tree(tmp_path)
+    dialog = OutlineViewerDialog(
+        None,
+        entries=[(tree.surface_thumb, THUMB)],
+        display_size=224,
+        frame_settings=FrameSettings([tree.finds], tree.csv),
+    )
+    dialog.frame_panel._load_async = False
+    return tree, dialog
+
+
+def _shortcut(dialog: OutlineViewerDialog, key: str) -> QShortcut:
+    target = QKeySequence(key)
+    for shortcut in dialog.findChildren(QShortcut):
+        if shortcut.key() == target:
+            return shortcut
+    raise AssertionError(f"missing shortcut {key}")
+
+
+def test_frame_edit_marks_dirty_and_saves_thumb_coords(qapp, tmp_path: Path) -> None:
+    tree, dialog = _outline_dialog(tmp_path)
+    dialog.toggle_frame_panel()
+    assert dialog.frame_panel.isVisibleTo(dialog)
+    frame_canvas = dialog.frame_panel.canvas
+    frame_canvas._polygons[0]["points"][0] = [200.0, 100.0]  # frame px
+    frame_canvas.polygonsChanged.emit()
+    assert dialog._dirty is True
+    assert dialog._polygons[0]["points"][0] == [12.0, 12.0]
+    assert dialog.canvas._polygons is dialog._polygons
+    dialog.save_current()
+    saved = extract_polygons(load_labelme_json(tree.surface_json))
+    assert saved[0]["points"][0] == [12.0, 12.0]
+    assert not (tree.finds / FLIGHT / "images" / f"{STEM}.json").exists()
+    dialog.close()
+
+
+def test_thumb_edit_updates_frame_panel(qapp, tmp_path: Path) -> None:
+    _tree, dialog = _outline_dialog(tmp_path)
+    dialog.toggle_frame_panel()
+    dialog._polygons[0]["points"][0] = [20.0, 20.0]
+    dialog.canvas.polygonsChanged.emit()
+    assert dialog.frame_panel.canvas._polygons[0]["points"][0] == [208.0, 108.0]
+    dialog.close()
+
+
+def test_locked_polygon_blocked_in_frame_panel(qapp, tmp_path: Path) -> None:
+    _tree, dialog = _outline_dialog(tmp_path)
+    dialog.toggle_frame_panel()
+    dialog.toggle_lock_selected()
+    frame_canvas = dialog.frame_panel.canvas
+    frame_canvas.set_mode("edit")
+    assert frame_canvas.mode == "edit"
+    assert frame_canvas._selected == 0
+    before = [list(point) for point in frame_canvas._polygons[0]["points"]]
+    messages: list[str] = []
+    frame_canvas.statusMessage.connect(messages.append)
+    frame_canvas._set_selected_points([[1.0, 1.0], [2.0, 1.0], [2.0, 2.0]])
+    assert frame_canvas._polygons[0]["points"] == before
+    assert messages == ["Polygon is locked — press K to unlock before editing."]
+    assert dialog.status_label.text() == messages[0]
+    dialog.close()
+
+
+def test_shift_f_hidden_by_default(qapp, tmp_path: Path) -> None:
+    _tree, dialog = _outline_dialog(tmp_path)
+    assert not dialog.frame_panel.isVisibleTo(dialog)
+    assert dialog.frame_btn.text() == "Frame"
+    assert dialog.frame_btn.isCheckable()
+    assert not dialog.frame_btn.isChecked()
+    splitter = dialog.canvas.parentWidget()
+    assert isinstance(splitter, QSplitter)
+    assert splitter.orientation() == Qt.Orientation.Horizontal
+    assert splitter.indexOf(dialog.canvas) >= 0
+    assert splitter.indexOf(dialog.frame_panel) >= 0
+    dialog.toggle_frame_panel()
+    assert dialog.frame_panel.isVisibleTo(dialog)
+    assert dialog.frame_btn.isChecked()
+    dialog.toggle_frame_panel()
+    assert not dialog.frame_panel.isVisibleTo(dialog)
+    assert not dialog.frame_btn.isChecked()
+    _shortcut(dialog, "Shift+F").activated.emit()
+    assert dialog.frame_panel.isVisibleTo(dialog)
+    assert dialog.frame_btn.isChecked()
+    dialog.frame_btn.clicked.emit()
+    assert not dialog.frame_panel.isVisibleTo(dialog)
+    dialog.close()

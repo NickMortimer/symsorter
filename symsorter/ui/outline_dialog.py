@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import (
@@ -25,9 +25,13 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QRadioButton,
+    QSplitter,
     QVBoxLayout,
     QWidget,
 )
+
+if TYPE_CHECKING:
+    from symsorter.ui.frame_settings import FrameSettings
 
 from symsorter.outline.backends import DEFAULT_THUMB_SIZE, load_sam_model, sam_polygon
 from symsorter.outline.edit_geom import (
@@ -862,8 +866,13 @@ class OutlineViewerDialog(QDialog):
         display_size: int = DEFAULT_DISPLAY_SIZE,
         sam_model: str = "sam_b.pt",
         device: str | None = None,
+        frame_settings: FrameSettings | None = None,
     ):
         super().__init__(parent)
+        if frame_settings is None:
+            from symsorter.ui.frame_settings import load_frame_settings
+
+            frame_settings = load_frame_settings()
         self.entries = entries
         self.index = max(0, min(start_index, len(entries) - 1)) if entries else 0
         self.display_size = display_size
@@ -924,7 +933,18 @@ class OutlineViewerDialog(QDialog):
         self.canvas.polygonsChanged.connect(self._on_canvas_polys_changed)
         self.canvas.statusMessage.connect(self._set_status)
         self.canvas.selectionChanged.connect(self._on_selection_changed)
-        layout.addWidget(self.canvas, stretch=1)
+
+        from symsorter.ui.frame_panel import FramePanel
+
+        self.frame_panel = FramePanel(frame_settings, self)
+        self.frame_panel.hide()
+        self.frame_panel.polygonsEdited.connect(self._on_frame_polygons_edited)
+        self.frame_panel.selectionChanged.connect(self._on_frame_selection_changed)
+        self.frame_panel.canvas.statusMessage.connect(self._set_status)
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.addWidget(self.canvas)
+        splitter.addWidget(self.frame_panel)
+        layout.addWidget(splitter, stretch=1)
 
         self.status_label = QLabel("")
         self.status_label.setWordWrap(True)
@@ -942,6 +962,12 @@ class OutlineViewerDialog(QDialog):
         self.fit_btn = QPushButton("Fit")
         self.fit_btn.clicked.connect(self._fit_view)
         nav.addWidget(self.fit_btn)
+
+        self.frame_btn = QPushButton("Frame")
+        self.frame_btn.setCheckable(True)
+        self.frame_btn.setToolTip("Show the original frame (Shift+F)")
+        self.frame_btn.clicked.connect(self.toggle_frame_panel)
+        nav.addWidget(self.frame_btn)
 
         self.lock_btn = QPushButton("Lock good (K)")
         self.lock_btn.clicked.connect(self.toggle_lock_selected)
@@ -1008,6 +1034,7 @@ class OutlineViewerDialog(QDialog):
         self._bind_shortcut("Shift+K", lambda: self.toggle_lock_selected(force_unlock=True))
         self._bind_shortcut("S", self.sam_from_imported_boxes)
         self._bind_shortcut("F", self._fit_view)
+        self._bind_shortcut("Shift+F", self.toggle_frame_panel)
         self._bind_shortcut("Left", self.show_prev)
         self._bind_shortcut("Right", self.show_next)
         self._bind_shortcut("Ctrl+S", self.save_current)
@@ -1068,6 +1095,8 @@ class OutlineViewerDialog(QDialog):
         for radio, (mode, tip) in tips.items():
             if radio.isChecked():
                 self.canvas.set_mode(mode)
+                if self._frame_panel_is_open():
+                    self.frame_panel.set_tool_mode(mode)
                 if self.entries:
                     self.status_label.setText(tip)
                 break
@@ -1119,6 +1148,45 @@ class OutlineViewerDialog(QDialog):
         self._sync_browser_to_current()
         self.refresh()
 
+    def _frame_panel_is_open(self) -> bool:
+        return self.frame_panel.isVisibleTo(self)
+
+    def toggle_frame_panel(self) -> None:
+        """Show or hide the original-frame outline panel."""
+        opening = not self._frame_panel_is_open()
+        self.frame_btn.blockSignals(True)
+        self.frame_btn.setChecked(opening)
+        self.frame_btn.blockSignals(False)
+        if not opening:
+            self.frame_panel.hide()
+            return
+        self.frame_panel.show()
+        if self.entries:
+            thumb_path, _display_name = self._current_paths()
+            self.frame_panel.show_thumb(thumb_path, self._polygons, self._selected)
+        self.frame_panel.set_tool_mode(self.canvas.mode)
+
+    def _on_frame_polygons_edited(self) -> None:
+        self._polygons[:] = self.frame_panel.thumb_polygons()
+        self._dirty = True
+        self.canvas.update()
+        self._update_title()
+
+    def _on_frame_selection_changed(self, index: object) -> None:
+        self._selected = index if isinstance(index, int) else None
+        self.canvas.set_selected(self._selected)
+        self._update_title()
+
+    def _sync_frame_from_thumb(self) -> None:
+        if self._frame_panel_is_open():
+            self.frame_panel.sync_from_thumb(self._polygons, self._selected)
+
+    def _reload_frame_panel(self) -> None:
+        if not self._frame_panel_is_open() or not self.entries:
+            return
+        thumb_path, _display_name = self._current_paths()
+        self.frame_panel.show_thumb(thumb_path, self._polygons, self._selected)
+
     def _push_scene(self, *, refit: bool) -> None:
         self.canvas.set_scene(
             self._src_pix,
@@ -1128,15 +1196,18 @@ class OutlineViewerDialog(QDialog):
             image_height=self._img_h,
             refit=refit,
         )
+        self._sync_frame_from_thumb()
 
     def _on_canvas_polys_changed(self) -> None:
         self._dirty = True
         # polygons already mutated in-place on the shared list
         self._update_title()
+        self._sync_frame_from_thumb()
 
     def _on_selection_changed(self, index: object) -> None:
         self._selected = index if isinstance(index, int) else None
         self._update_title()
+        self._sync_frame_from_thumb()
 
     def _update_title(self) -> None:
         if not self.entries:
@@ -1174,6 +1245,7 @@ class OutlineViewerDialog(QDialog):
             self._push_scene(refit=True)
             self.status_label.setText(f"Missing image: {thumb_path}")
             self._update_title()
+            self._reload_frame_panel()
             return
 
         self._src_pix = QPixmap(str(thumb_path))
@@ -1189,6 +1261,7 @@ class OutlineViewerDialog(QDialog):
             "Edit = drag vertices"
         )
         self.status_label.setText(tip)
+        self._reload_frame_panel()
 
     def _on_point_seed(self, x: float, y: float) -> None:
         thumb_path, _ = self._current_paths()
