@@ -169,6 +169,7 @@ from .commands.prepare_dataset import (
 )
 from .commands.outline_draft import outline_draft_command
 from .commands.outline_import_boxes import outline_import_boxes_command
+from .commands.outline_export_frames import outline_export_frames_command
 from .commands.remap_sorted_npz import remap_sorted_npz_command
 
 @app.command(name="sort")
@@ -361,6 +362,62 @@ def outline_import_boxes(
         device=device,
         min_match_score=min_match_score,
         out=out,
+    )
+
+
+@app.command(name="outline-export-frames")
+def outline_export_frames(
+    thumbs: list[Path] = typer.Option(
+        ...,
+        "--thumbs",
+        help="Thumbnail folder of flat *_224px.jpg files (repeatable)",
+    ),
+    survey_roots: list[Path] = typer.Option(
+        ...,
+        "--survey-root",
+        help="Root used to locate original frames (repeatable)",
+    ),
+    roi_csv: Path = typer.Option(
+        ...,
+        "--roi-csv",
+        help="thumb_roi.csv; only status=ok rows are used",
+    ),
+    out: Path = typer.Option(
+        ...,
+        "--out",
+        help="Output directory for frame links, LabelMe JSON, and manifest",
+    ),
+    link: str = typer.Option(
+        "hard",
+        "--link",
+        help="Place frames by hardlink, symlink, or copy (hard|sym|copy)",
+    ),
+    overwrite: bool = typer.Option(
+        False,
+        "--overwrite",
+        help="Rebuild a frame JSON that already exists",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Count only; write nothing",
+    ),
+    limit: int = typer.Option(
+        None,
+        "--limit",
+        help="Process only the first N thumbs",
+    ),
+):
+    """Write locked thumb outlines onto original frames."""
+    return outline_export_frames_command(
+        thumbs=thumbs,
+        survey_roots=survey_roots,
+        roi_csv=roi_csv,
+        out=out,
+        link=link,
+        overwrite=overwrite,
+        dry_run=dry_run,
+        limit=limit,
     )
 
 
