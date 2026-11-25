@@ -1,11 +1,42 @@
-"""Tests for OutlineCanvas frame overlays, crop rect, and status message."""
+"""Tests for OutlineCanvas frame overlays and FramePanel."""
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, Qt
-from PySide6.QtGui import QMouseEvent, QPixmap
+import json
+import time
+from pathlib import Path
+from typing import NamedTuple
 
+from PIL import Image
+from PySide6.QtCore import QEvent, QSettings, Qt, QThreadPool
+from PySide6.QtGui import QMouseEvent, QPixmap
+from PySide6.QtWidgets import (
+    QDialog,
+    QLineEdit,
+    QPlainTextEdit,
+    QPushButton,
+)
+
+from symsorter.outline.export_labelme import extract_polygons, load_labelme_json
+from symsorter.ui import frame_panel as frame_panel_mod
+from symsorter.ui.frame_panel import FramePanel
+from symsorter.ui.frame_settings import (
+    FrameSettings,
+    edit_frame_settings_dialog,
+    load_frame_settings,
+    roi_csv_for,
+    save_frame_settings,
+)
 from symsorter.ui.outline_dialog import OutlineCanvas
+
+THUMB = "050_DJIP4_RGB_AU_MANGB_20230503T113703_2116_det_0_turtle_3_224px.jpg"
+DEEP_THUMB = "050_DJIP4_RGB_AU_MANGB_20230503T113703_2116_det_1_turtle_3_224px.jpg"
+STEM = "DJIP4_RGB_AU_MANGB_20230503T113703_2116"
+FLIGHT = "MANGB_20230503T1137"
+ROI_HEADER = (
+    "view,crop_basename,flight,x1,y1,x2,y2,confidence,class_name,original_image,status"
+)
+# 640x480 frame; box centred at (300, 200) → crop window (188, 88, 412, 312)
 
 
 def test_overlays_are_not_hit_testable(qapp, tmp_path) -> None:
@@ -63,3 +94,263 @@ def test_message_replaces_no_image_when_pixmap_missing(qapp) -> None:
     assert blank.toImage() != labelled.toImage()
     canvas.set_message(None)
     assert canvas._message is None
+
+
+class _PanelTree(NamedTuple):
+    finds: Path
+    csv: Path
+    surface_thumb: Path
+    surface_json: Path
+    frame: Path
+
+
+def _roi_line(view: str, name: str, stem: str, box: tuple[int, int, int, int]) -> str:
+    x1, y1, x2, y2 = box
+    return (
+        f"{view},{name},{FLIGHT},{x1},{y1},{x2},{y2},0.5,turtle_3,"
+        f"/media/x/Timor2/surveys/AU/MANGB/{FLIGHT}/{stem}.JPG,ok"
+    )
+
+
+def _write_labelme(thumb: Path, points: list[list[int]], *, locked: bool) -> Path:
+    thumb.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (224, 224)).save(thumb, "JPEG")
+    payload = {
+        "version": "5.0.1",
+        "flags": {},
+        "shapes": [
+            {
+                "label": "turtle",
+                "points": points,
+                "group_id": None,
+                "shape_type": "polygon",
+                "flags": {"locked": locked, "draft": not locked},
+            }
+        ],
+        "imagePath": thumb.name,
+        "imageData": None,
+        "imageHeight": 224,
+        "imageWidth": 224,
+    }
+    json_path = thumb.with_suffix(".json")
+    json_path.write_text(json.dumps(payload), encoding="utf-8")
+    return json_path
+
+
+def _panel_tree(tmp_path: Path) -> _PanelTree:
+    """Surface plus one locked deep neighbour, sharing a 640×480 frame."""
+    training = tmp_path / "training"
+    finds = tmp_path / "finds"
+    surface_json = _write_labelme(
+        training / "surface" / THUMB,
+        [[10, 10], [50, 10], [50, 50]],
+        locked=False,
+    )
+    _write_labelme(
+        training / "deep" / DEEP_THUMB,
+        [[0, 0], [10, 0], [10, 10]],
+        locked=True,
+    )
+    frame = finds / FLIGHT / "images" / f"{STEM}.JPG"
+    frame.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (640, 480), color=(30, 30, 30)).save(frame, "JPEG")
+    csv_path = training / "thumb_roi.csv"
+    csv_path.write_text(
+        ROI_HEADER
+        + "\n"
+        + _roi_line("surface", THUMB, STEM, (290, 190, 310, 210))
+        + "\n"
+        + _roi_line("deep", DEEP_THUMB, STEM, (490, 390, 510, 410))
+        + "\n",
+        encoding="utf-8",
+    )
+    return _PanelTree(
+        finds, csv_path, surface_json.with_suffix(".jpg"), surface_json, frame
+    )
+
+
+def _assert_reason(panel: FramePanel, reason: str) -> None:
+    assert panel.reason == reason
+    message = panel.canvas._message
+    assert isinstance(message, str)
+    assert reason in message
+    assert message.strip() != reason
+
+
+def test_show_thumb_maps_polys_crop_and_neighbours(qapp, tmp_path: Path) -> None:
+    t = _panel_tree(tmp_path)
+    panel = FramePanel(FrameSettings([t.finds], t.csv), load_async=False)
+    assert panel._load_async is False
+    polys = extract_polygons(load_labelme_json(t.surface_json))
+    panel.show_thumb(t.surface_thumb, polys, 0)
+    assert panel.reason is None
+    assert panel.canvas._message is None
+    assert panel.canvas._polygons[0]["points"] == [[198, 98], [238, 98], [238, 138]]
+    assert panel.canvas._crop_rect == (188, 88, 412, 312)
+    assert len(panel.canvas._overlays) == 1  # deep neighbour, locked
+    assert panel.canvas._overlays[0] == [[388, 256], [398, 256], [398, 266]]
+    assert panel.thumb_polygons()[0]["points"] == polys[0]["points"]
+    assert panel.canvas._polygons[0]["flags"] is not polys[0]["flags"]
+
+    polys[0]["flags"]["marker"] = "caller"
+    assert "marker" not in panel.canvas._polygons[0]["flags"]
+    edited = extract_polygons(load_labelme_json(t.surface_json))
+    edited[0]["points"] = [[1, 2], [8, 2], [8, 9]]
+    t.frame.unlink()
+    panel.sync_from_thumb(edited, None)
+    assert panel.reason is None
+    assert panel.canvas._polygons[0]["points"] == [[189, 90], [196, 90], [196, 97]]
+    assert panel.canvas._selected is None
+    assert panel.canvas._src is not None and not panel.canvas._src.isNull()
+    assert (panel.canvas._src.width(), panel.canvas._src.height()) == (640, 480)
+    assert panel.thumb_polygons()[0]["points"] == [[1, 2], [8, 2], [8, 9]]
+    edited[0]["flags"]["marker"] = "after-sync"
+    assert panel.canvas._polygons[0]["flags"].get("marker") != "after-sync"
+
+
+def test_reasons(qapp, tmp_path: Path) -> None:
+    t = _panel_tree(tmp_path)
+    panel = FramePanel(FrameSettings([t.finds], t.csv), load_async=False)
+    missing = t.surface_thumb.with_name("not_in_the_csv_224px.jpg")
+    panel.show_thumb(missing, [], None)
+    _assert_reason(panel, "no_roi_row")
+
+    t.frame.unlink()
+    polys = extract_polygons(load_labelme_json(t.surface_json))
+    panel.show_thumb(t.surface_thumb, polys, 0)
+    _assert_reason(panel, "frame_missing")
+
+    bare = FramePanel(FrameSettings(), load_async=False)
+    bare.show_thumb(t.surface_thumb, polys, 0)
+    _assert_reason(bare, "no_survey_roots")
+
+
+def test_sam_modes_disabled(qapp) -> None:
+    panel = FramePanel(FrameSettings(), load_async=False)
+    assert panel._load_async is False
+    panel.set_tool_mode("box")
+    assert panel.canvas.mode == "view"
+    panel.set_tool_mode("point")
+    assert panel.canvas.mode == "view"
+    panel.set_tool_mode("lasso")
+    assert panel.canvas.mode == "lasso"
+    seen: list[object] = []
+    panel.polygonsEdited.connect(lambda: seen.append("edited"))
+    panel.selectionChanged.connect(seen.append)
+    panel.canvas.polygonsChanged.emit()
+    panel.canvas.selectionChanged.emit(2)
+    assert seen == ["edited", 2]
+
+
+def test_stale_load_is_ignored(qapp, tmp_path: Path, monkeypatch) -> None:
+    training = tmp_path / "training"
+    finds = tmp_path / "finds"
+    surface = training / "surface"
+    surface.mkdir(parents=True)
+    images = finds / FLIGHT / "images"
+    images.mkdir(parents=True)
+    thumb_a = surface / "a_det_0_224px.jpg"
+    thumb_b = surface / "b_det_0_224px.jpg"
+    Image.new("RGB", (32, 32)).save(thumb_a, "JPEG")
+    Image.new("RGB", (32, 32)).save(thumb_b, "JPEG")
+    stem_a = "FRAME_A_800x600"
+    stem_b = "FRAME_B_640x480"
+    Image.new("RGB", (800, 600), color=(200, 0, 0)).save(
+        images / f"{stem_a}.JPG", "JPEG"
+    )
+    Image.new("RGB", (640, 480), color=(0, 0, 200)).save(
+        images / f"{stem_b}.JPG", "JPEG"
+    )
+    csv_path = training / "thumb_roi.csv"
+    box = (100, 100, 140, 140)
+    csv_path.write_text(
+        ROI_HEADER
+        + "\n"
+        + _roi_line("surface", thumb_a.name, stem_a, box)
+        + "\n"
+        + _roi_line("surface", thumb_b.name, stem_b, box)
+        + "\n",
+        encoding="utf-8",
+    )
+    original_run = frame_panel_mod._FrameLoadRunnable.run
+
+    def _delay_previous(self: frame_panel_mod._FrameLoadRunnable) -> None:
+        if "FRAME_A_800x600" in self._path:
+            time.sleep(0.25)
+        original_run(self)
+
+    monkeypatch.setattr(frame_panel_mod._FrameLoadRunnable, "run", _delay_previous)
+    panel = FramePanel(FrameSettings([finds], csv_path), load_async=True)
+    assert panel._load_async is True
+    panel.show_thumb(thumb_a, [], None)
+    panel.show_thumb(thumb_b, [], None)
+    QThreadPool.globalInstance().waitForDone()
+    qapp.processEvents()
+    pix = panel.canvas._src
+    assert pix is not None and not pix.isNull()
+    assert (pix.width(), pix.height()) == (640, 480)
+
+
+def test_settings_round_trip(qapp, tmp_path: Path, monkeypatch) -> None:
+    """Round-trip settings without writing the user's real QSettings."""
+    ini = tmp_path / "qt-settings.ini"
+    calls: list[tuple[object, ...]] = []
+
+    def _factory(*args: object, **_kwargs: object) -> QSettings:
+        calls.append(args)
+        return QSettings(str(ini), QSettings.Format.IniFormat)
+
+    monkeypatch.setattr("symsorter.ui.frame_settings.QSettings", _factory)
+    save_frame_settings(FrameSettings([tmp_path], tmp_path / "r.csv"))
+    loaded = load_frame_settings()
+    assert loaded.survey_roots == [tmp_path] and loaded.roi_csv == tmp_path / "r.csv"
+    assert calls and all(call[:2] == ("symsorter", "symsorter") for call in calls)
+
+    stored = QSettings(str(ini), QSettings.Format.IniFormat)
+    assert stored.value("outline/roi_csv") == str(tmp_path / "r.csv")
+    roots = stored.value("outline/survey_roots")
+    root_values = roots if isinstance(roots, list) else [roots]
+    assert str(tmp_path) in [str(item) for item in root_values]
+
+    folder = tmp_path / "training" / "surface"
+    assert roi_csv_for(folder, loaded) == tmp_path / "r.csv"
+    assert roi_csv_for(folder, FrameSettings()) is None
+    sibling = tmp_path / "training" / "thumb_roi.csv"
+    sibling.parent.mkdir(parents=True, exist_ok=True)
+    sibling.write_text("view\n", encoding="utf-8")
+    assert roi_csv_for(folder, FrameSettings()) == sibling
+
+
+def test_edit_frame_settings_dialog_ok_saves_cancel_returns_none(
+    qapp, tmp_path: Path, monkeypatch
+) -> None:
+    ini = tmp_path / "dialog-settings.ini"
+
+    def _factory(*_args: object, **_kwargs: object) -> QSettings:
+        return QSettings(str(ini), QSettings.Format.IniFormat)
+
+    monkeypatch.setattr("symsorter.ui.frame_settings.QSettings", _factory)
+    monkeypatch.setattr(QDialog, "exec", lambda _dialog: QDialog.DialogCode.Rejected)
+    assert edit_frame_settings_dialog(None) is None
+
+    root = tmp_path / "survey"
+    csv_path = tmp_path / "roi.csv"
+
+    def _ok(dialog: QDialog) -> QDialog.DialogCode:
+        roots = dialog.findChild(QPlainTextEdit)
+        csv_edit = dialog.findChild(QLineEdit)
+        assert roots is not None and csv_edit is not None
+        labels = [button.text() for button in dialog.findChildren(QPushButton)]
+        assert "Add folder…" in labels
+        assert "Browse…" in labels
+        roots.setPlainText(f"\n{root}\n\n")
+        csv_edit.setText(str(csv_path))
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(QDialog, "exec", _ok)
+    saved = edit_frame_settings_dialog(None)
+    assert saved is not None
+    assert saved.survey_roots == [root]
+    assert saved.roi_csv == csv_path
+    loaded = load_frame_settings()
+    assert loaded.survey_roots == [root] and loaded.roi_csv == csv_path
