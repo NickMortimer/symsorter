@@ -1,8 +1,10 @@
-"""ROI CSV index and thumb ↔ frame geometry."""
+"""ROI CSV index, frame lookup, and thumb ↔ frame geometry."""
 
 from __future__ import annotations
 
 import csv
+import os
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
@@ -116,3 +118,80 @@ def iter_flat_thumbs(folder: Path) -> list[Path]:
         and not path.name.startswith("._")
     ]
     return sorted(paths)
+
+
+IMAGE_EXTS = {".jpg", ".jpeg", ".png"}
+
+
+def _is_image_name(name: str) -> bool:
+    """True for an image filename that is not an AppleDouble sidecar."""
+    return not name.startswith("._") and Path(name).suffix.lower() in IMAGE_EXTS
+
+
+def _first_named(directory: Path, stem: str) -> Path | None:
+    """Return the first image in ``directory`` with this stem, or None."""
+    if not directory.is_dir():
+        return None
+    matches = [
+        path
+        for path in directory.iterdir()
+        if path.is_file() and path.stem == stem and _is_image_name(path.name)
+    ]
+    if not matches:
+        return None
+    return sorted(matches)[0]
+
+
+def _survey_match(root: Path, flight: str, stem: str) -> Path | None:
+    """Return a frame at ``{root}/*/{site}/{flight}/``, or None."""
+    site = flight.split("_")[0]
+    countries = sorted(
+        path
+        for path in root.iterdir()
+        if path.is_dir() and not path.name.startswith("._")
+    )
+    for country in countries:
+        found = _first_named(country / site / flight, stem)
+        if found is not None:
+            return found
+    return None
+
+
+class FrameResolver:
+    """Locate an original frame under survey roots; the first match wins."""
+
+    def __init__(self, roots: Sequence[Path]) -> None:
+        self._roots = [Path(root) for root in roots]
+        self._by_root: dict[Path, dict[str, Path]] = {}
+
+    def find(self, flight: str, stem: str) -> Path | None:
+        """Return the frame for ``flight`` and ``stem``, or None if absent."""
+        for root in self._roots:
+            if not root.is_dir():
+                continue
+            found = _first_named(root / flight / "images", stem)
+            if found is not None:
+                return found
+            found = _survey_match(root, flight, stem)
+            if found is not None:
+                return found
+            indexed = self._stem_index(root).get(stem)
+            if indexed is not None:
+                return indexed
+        return None
+
+    def _stem_index(self, root: Path) -> dict[str, Path]:
+        """Lazily map stems to the first image in sorted walk order."""
+        cached = self._by_root.get(root)
+        if cached is not None:
+            return cached
+        index: dict[str, Path] = {}
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = sorted(name for name in dirnames if not name.startswith("._"))
+            for name in sorted(filenames):
+                if not _is_image_name(name):
+                    continue
+                path = Path(dirpath) / name
+                index.setdefault(path.stem, path)
+        self._by_root[root] = index
+        return index

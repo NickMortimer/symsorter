@@ -7,6 +7,7 @@ from pathlib import Path
 from PIL import Image
 
 from symsorter.outline.frames import (
+    FrameResolver,
     RoiIndex,
     RoiRow,
     crop_window_for_row,
@@ -69,3 +70,39 @@ def test_iter_flat_thumbs_skips_appledouble(tmp_path: Path) -> None:
     (tmp_path / "sub").mkdir()
     Image.new("RGB", (224, 224)).save(tmp_path / "sub" / THUMB)
     assert iter_flat_thumbs(tmp_path) == [tmp_path / THUMB]
+
+
+def _img(p: Path) -> None:
+    p.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (8, 8)).save(p, "JPEG")
+
+
+def test_resolver_yolo_layout_first_root_wins(tmp_path: Path) -> None:
+    a, b = tmp_path / "a", tmp_path / "b"
+    _img(a / FLIGHT / "images" / f"{STEM}.JPG")
+    _img(b / FLIGHT / "images" / f"{STEM}.JPG")
+    assert FrameResolver([a, b]).find(FLIGHT, STEM) == a / FLIGHT / "images" / f"{STEM}.JPG"
+
+
+def test_resolver_survey_layout_lowercase_ext(tmp_path: Path) -> None:
+    p = tmp_path / "AU" / "MANGB" / FLIGHT / f"{STEM}.jpg"
+    _img(p)
+    assert FrameResolver([tmp_path]).find(FLIGHT, STEM) == p
+
+
+def test_resolver_recursive_fallback(tmp_path: Path) -> None:
+    p = tmp_path / "odd" / "place" / f"{STEM}.JPG"
+    _img(p)
+    assert FrameResolver([tmp_path / "missing", tmp_path]).find(FLIGHT, STEM) == p
+
+
+def test_resolver_ignores_json_and_appledouble(tmp_path: Path) -> None:
+    d = tmp_path / FLIGHT / "images"
+    d.mkdir(parents=True)
+    (d / f"{STEM}.json").write_text("{}")
+    (d / f"._{STEM}.JPG").write_bytes(b"x")
+    assert FrameResolver([tmp_path]).find(FLIGHT, STEM) is None
+
+
+def test_resolver_missing(tmp_path: Path) -> None:
+    assert FrameResolver([tmp_path]).find(FLIGHT, STEM) is None
