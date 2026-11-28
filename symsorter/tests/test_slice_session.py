@@ -148,7 +148,8 @@ def test_reviews_for_slices_not_in_project_are_ignored(tmp_path):
                         "reviewer": "r", "time": "t"})
     with open(proj / "review.jsonl", "a") as f:
         f.write(extra + "\n")
-    s2 = open_session(proj, local)
+    with pytest.warns(UserWarning, match="other project"):
+        s2 = open_session(proj, local)
     assert s2.progress()["total"] == 2
     assert s2.progress()["skip"] == 0 and s2.progress()["complete"] == 1
     s2.save("skip")
@@ -265,3 +266,15 @@ def test_reviews_for_other_project_are_ignored_with_warning(tmp_path):
     with pytest.warns(UserWarning, match="someone_else"):
         s = open_session(proj, local)
     assert s.foreign_reviews == 1 and s.status(0) is None and s.index == 0
+
+
+def test_validate_local(tmp_path):
+    from symsorter.slices.session import validate_local
+    with pytest.raises(ValueError, match="at least one"):
+        validate_local([], "nick")
+    with pytest.raises(ValueError, match="existing folder"):
+        validate_local([tmp_path / "nope"], "nick")
+    with pytest.raises(ValueError, match="reviewer"):
+        validate_local([tmp_path], "  ")
+    got = validate_local([tmp_path], " nick ")
+    assert got.reviewer == "nick" and got.survey_roots == [tmp_path]

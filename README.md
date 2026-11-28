@@ -283,9 +283,18 @@ In the Outline viewer, **Shift+F** (or the Frame button) opens the original-fram
 
 Review 624 px slices cut from full drone frames (a `marine_count` slice project) and mark each complete, rejected or skipped. File > **Open Slice Project...**, or `symsorter-gui --slice-project DIR`. The first open asks for survey roots (prefilled from Set Survey Roots) and a reviewer name, saved in `project.local.json` (laptop only). Frames are found by flight + stem and must match `frame_wh`; a slice whose frame is missing or the wrong size shows the problem and cannot be saved.
 
-The loop: open the project, check or fix the outlines (add a missed turtle with the SAM + tool), press `C`. Outline the whole turtle even past the slice edge; a complete slice whose outline crosses the edge is refused, and `R` moves the slice the least distance that holds every outline (check it, then `C`). The window resumes at the next unreviewed slice.
+The loop: open the project, check or fix the outlines (add a missed turtle with the SAM + tool), press `C`. Outline the whole turtle even past the slice edge; a complete slice whose outline crosses the edge is refused, and `R` moves the slice the least distance that holds every outline (check it, then `C`). The window resumes at the next unreviewed slice. Skipped slices count as done for `N`; go back to them with `P` (the title shows the skip count). A slice is only saved once its image is on screen, and holding `C`/`X`/`Space` does not repeat. Use **Settings...** in the window to change survey roots or reviewer later (the window keeps its place). Opening a project that is already open raises the existing window.
 
 Keys: `C` complete · `X` reject (optional reason) · `Space` skip · `N` next unreviewed · `P` previous · `R` re-centre · `A` adopt neighbour outlines · `E` edit · `L` lasso · `S` SAM point · `D` delete polygon · `H` pan. The slice border is dashed; neighbours are faint.
+
+Export locked thumb outlines for marine_objects (run on the laptop; needs the sealed-survey list, see Sync):
+
+```bash
+symsorter outline-export-contract --thumbs DIR [--thumbs DIR2 ...] --roi-csv thumb_roi.csv \
+  --survey-root DIR [--survey-root DIR2 ...] --denylist sealed_surveys.txt --out outlines.jsonl
+```
+
+It writes locked polygons in full-frame pixels to `outlines.jsonl` and prints counts: `ok` outlines written; `sealed` thumbs skipped because their survey is in the denylist; `no_locked` thumbs with no locked polygon; `no_roi_row` locked thumbs missing from the ROI CSV; `frame_missing` original frame not found under the survey roots; `frame_unreadable` frame found but its header could not be read.
 
 Sync (run on the laptop; each file has one writer, so rsync never conflicts):
 

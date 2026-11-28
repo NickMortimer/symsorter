@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 from symsorter.outline.backends import load_sam_model, sam_polygon
 from symsorter.slices.geometry import sam_window, to_frame, to_view, view_rect
 from symsorter.slices.session import (
-    LocalSettings, ReviewSession, SaveRefused, load_local, save_local,
+    LocalSettings, ReviewSession, SaveRefused, load_local, save_local, validate_local,
 )
 from symsorter.ui.outline_dialog import OutlineCanvas
 
@@ -27,6 +27,7 @@ _CACHE_SIZE = 4
 _KEYS = {Qt.Key_C: "_complete", Qt.Key_X: "_reject", Qt.Key_Space: "_skip",
          Qt.Key_N: "_next", Qt.Key_P: "_prev", Qt.Key_R: "_recentre", Qt.Key_A: "_adopt",
          Qt.Key_Delete: "delete_selected", Qt.Key_Backspace: "delete_selected"}
+_SAVE_KEYS = (Qt.Key_C, Qt.Key_X, Qt.Key_Space)
 _TOOL_KEYS = {Qt.Key_E: "edit", Qt.Key_L: "lasso", Qt.Key_S: "point", Qt.Key_D: "delete",
               Qt.Key_H: "view"}
 _TOOLS = [("Edit", "edit"), ("Add point", "add_point"), ("Lasso (-pts)", "lasso"),
@@ -56,7 +57,11 @@ class _Load(QRunnable):
         self.key, self._path, self._rect, self._signals = key, path, rect, signals
 
     def run(self) -> None:
-        self._signals.loaded.emit(self.key, _load_crop(self._path, self._rect))
+        img = _load_crop(self._path, self._rect)
+        try:
+            self._signals.loaded.emit(self.key, img)
+        except RuntimeError:  # dialog closed while this worker was still decoding
+            pass
 
 
 class SliceReviewDialog(QDialog):
@@ -68,6 +73,7 @@ class SliceReviewDialog(QDialog):
         self._polys: list[dict[str, Any]] = []
         self._view: tuple = (0, 0, 1, 1)
         self._want: Optional[str] = None
+        self._shown_key: Optional[str] = None  # key of the image actually on the canvas
         self._images: OrderedDict[str, QImage] = OrderedDict()
         self._pending: set[str] = set()
         self._workers: set[_Load] = set()
@@ -110,7 +116,7 @@ class SliceReviewDialog(QDialog):
         for text, slot in (("Complete (C)", "_complete"), ("Reject (X)", "_reject"),
                            ("Skip (Space)", "_skip"), ("Prev (P)", "_prev"),
                            ("Next (N)", "_next"), ("Re-centre (R)", "_recentre"),
-                           ("Adopt (A)", "_adopt")):
+                           ("Adopt (A)", "_adopt"), ("Settings…", "_edit_settings")):
             b = QPushButton(text)
             b.setFocusPolicy(Qt.NoFocus)
             b.clicked.connect(getattr(self, slot))
@@ -125,14 +131,23 @@ class SliceReviewDialog(QDialog):
 
     def _ask_reason(self) -> Optional[str]:
         text, ok = QInputDialog.getText(self, "Reject slice", "Reason (optional):")
-        return text.strip() or "" if ok else None
+        if not ok:
+            return None
+        return text.strip()
 
-    def _ask_leave(self) -> str:
+    def _make_leave_box(self) -> tuple:
         box = QMessageBox(QMessageBox.Question, "Unsaved edits",
                           "This slice has unsaved edits.", parent=self)
         save = box.addButton("Save as complete", QMessageBox.AcceptRole)
         discard = box.addButton("Discard", QMessageBox.DestructiveRole)
-        box.addButton("Cancel", QMessageBox.RejectRole)
+        cancel = box.addButton("Cancel", QMessageBox.RejectRole)
+        box.setDefaultButton(cancel)  # Space/Enter must never save by accident
+        box.setEscapeButton(cancel)
+        cancel.setFocus()
+        return box, save, discard
+
+    def _ask_leave(self) -> str:
+        box, save, discard = self._make_leave_box()
         box.exec()
         return {save: "save", discard: "discard"}.get(box.clickedButton(), "cancel")
 
@@ -144,6 +159,8 @@ class SliceReviewDialog(QDialog):
             self.session.discard_changes()
             return True
         if choice == "save":
+            if self._save_blocked():
+                return False
             try:
                 self.session.save("complete")
             except SaveRefused as e:
@@ -156,6 +173,7 @@ class SliceReviewDialog(QDialog):
     def show_current(self, refit: bool = True) -> None:
         s, cur = self.session, self.session.current
         lk = s.lookup()
+        self._shown_key = None
         x0, y0 = s.position()
         self._view = view_rect(x0, y0, cur.size, s.project.margin_px, cur.frame_wh)
         self._update_title()
@@ -180,6 +198,7 @@ class SliceReviewDialog(QDialog):
                 self._remember(key, img)
         if img is not None and not img.isNull():
             self._push(QPixmap.fromImage(img), v[2] - v[0], v[3] - v[1], refit)
+            self._shown_key = key
         else:
             self._push(QPixmap(), v[2] - v[0], v[3] - v[1], False)
             self.canvas.set_message("Loading…" if self._load_async else "frame unreadable")
@@ -235,6 +254,7 @@ class SliceReviewDialog(QDialog):
             return
         v = self._view
         self._push(QPixmap.fromImage(img), v[2] - v[0], v[3] - v[1], True)
+        self._shown_key = key
 
     def _update_title(self) -> None:
         s = self.session
@@ -288,7 +308,23 @@ class SliceReviewDialog(QDialog):
             QMessageBox.warning(self, "SAM failed", str(exc))
 
     # -- actions ----------------------------------------------------------
+    def _save_blocked(self) -> bool:
+        """True (with a status message) if the slice image is not on screen yet.
+
+        A slice must never be reviewed unseen: the image has to have been pushed to the
+        canvas. Frame problems are left to the session, which refuses with its own message.
+        """
+        if self.session.lookup().problem is not None:
+            return False
+        if self._shown_key is None or self._shown_key != self._want:
+            self._set_status("Image not shown yet (still loading or unreadable); "
+                             "cannot save this slice.")
+            return True
+        return False
+
     def _save(self, status: str, reason: Optional[str] = None) -> None:
+        if self._save_blocked():
+            return
         try:
             self.session.save(status, reason)
         except SaveRefused as e:
@@ -305,6 +341,8 @@ class SliceReviewDialog(QDialog):
         self._save("skip")
 
     def _reject(self) -> None:
+        if self._save_blocked():
+            return
         reason = self._ask_reason()
         if reason is not None:
             self._save("reject", reason or None)
@@ -332,6 +370,27 @@ class SliceReviewDialog(QDialog):
         else:
             self._set_status("No 624 slice can hold every outline. Reject this slice.")
 
+    def _edit_settings(self) -> None:
+        """Re-open roots/reviewer, rebuild the session on success and keep the slice index."""
+        if not self._leave_ok():
+            return
+        old = self.session
+        got = _ask_settings(self, old.local.survey_roots, old.local.reviewer)
+        if got is None:
+            return
+        local = LocalSettings(got[0], got[1])
+        try:
+            new = ReviewSession(old.project_dir, local)
+            save_local(old.project_dir, local)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "Cannot apply settings", str(exc))
+            return
+        new.goto(old.index)
+        self.session = new
+        self._images.clear()
+        self.show_current()
+        self._set_status("Settings updated.")
+
     def _adopt(self) -> None:
         n = self.session.adopt_neighbours()
         self.show_current(refit=False)
@@ -341,6 +400,8 @@ class SliceReviewDialog(QDialog):
     def keyPressEvent(self, event) -> None:  # noqa: N802
         k = event.key()
         if not event.modifiers() & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier):
+            if k in _SAVE_KEYS and event.isAutoRepeat():
+                return  # holding C/X/Space must not chain-complete slices
             if k in _KEYS:
                 getattr(self, _KEYS[k])()
                 return
@@ -360,8 +421,8 @@ class SliceReviewDialog(QDialog):
             event.ignore()
 
 
-def _ask_settings(parent, roots: list) -> Optional[tuple]:
-    """Ask for survey roots and a reviewer name; None if cancelled."""
+def _build_settings_dialog(parent, roots: list, reviewer: Optional[str] = None) -> QDialog:
+    """Settings dialog; OK is refused (dialog stays open) until the input validates."""
     dlg = QDialog(parent)
     dlg.setWindowTitle("Slice project settings")
     edit = QPlainTextEdit("\n".join(str(r) for r in roots))
@@ -373,17 +434,41 @@ def _ask_settings(parent, roots: list) -> Optional[tuple]:
             edit.setPlainText((edit.toPlainText().rstrip() + "\n" + d).strip())
 
     add.clicked.connect(_add)
-    reviewer = QLineEdit(getpass.getuser())
+    name = QLineEdit(reviewer or getpass.getuser())
     box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-    box.accepted.connect(dlg.accept)
+
+    def _ok() -> None:
+        try:
+            dlg.settings = _read_settings(edit, name)
+        except ValueError as e:
+            QMessageBox.warning(dlg, "Slice project settings", str(e))
+            return
+        dlg.accept()
+
+    box.accepted.connect(_ok)
     box.rejected.connect(dlg.reject)
     lay = QVBoxLayout(dlg)
-    for w in (QLabel("Survey roots (one per line)"), edit, add, QLabel("Reviewer"), reviewer, box):
+    for w in (QLabel("Survey roots (one per line)"), edit, add, QLabel("Reviewer"), name, box):
         lay.addWidget(w)
-    if dlg.exec() != QDialog.Accepted:
-        return None
+    dlg.settings = None
+    dlg.roots_edit, dlg.reviewer_edit, dlg.button_box = edit, name, box
+    return dlg
+
+
+def _read_settings(edit, name) -> LocalSettings:
     lines = [ln.strip() for ln in edit.toPlainText().splitlines() if ln.strip()]
-    return [Path(ln) for ln in lines], reviewer.text().strip()
+    return validate_local([Path(ln) for ln in lines], name.text())
+
+
+def _ask_settings(parent, roots: list, reviewer: Optional[str] = None) -> Optional[tuple]:
+    """Ask for survey roots and a reviewer name; None if cancelled. Result is validated."""
+    dlg = _build_settings_dialog(parent, roots, reviewer)
+    if dlg.exec() != QDialog.Accepted or dlg.settings is None:
+        return None
+    return dlg.settings.survey_roots, dlg.settings.reviewer
+
+
+_OPEN: dict = {}  # resolved project dir -> its review dialog (one session per review.jsonl)
 
 
 def open_slice_project_dialog(parent, project_dir: Optional[Path] = None) -> Optional[SliceReviewDialog]:
@@ -393,19 +478,29 @@ def open_slice_project_dialog(parent, project_dir: Optional[Path] = None) -> Opt
             return None
         project_dir = Path(chosen)
     project_dir = Path(project_dir)
+    key = str(project_dir.resolve())
+    existing = _OPEN.get(key)
+    if existing is not None and existing.isVisible():
+        existing.raise_()
+        existing.activateWindow()
+        return existing
     try:
         local = load_local(project_dir)
-        if local is None:
+        fresh = local is None
+        if fresh:
             from symsorter.ui.frame_settings import load_frame_settings
             got = _ask_settings(parent, load_frame_settings().survey_roots)
             if got is None:
                 return None
             local = LocalSettings(got[0], got[1])
+        session = ReviewSession(project_dir, local)  # validates the project before saving
+        if fresh:
             save_local(project_dir, local)
-        dlg = SliceReviewDialog(ReviewSession(project_dir, local), parent)
+        dlg = SliceReviewDialog(session, parent)
     except Exception as exc:  # noqa: BLE001
         QMessageBox.warning(parent, "Cannot open slice project", str(exc))
         return None
+    _OPEN[key] = dlg
     dlg.show_current()
     dlg.show()
     return dlg

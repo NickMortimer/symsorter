@@ -51,6 +51,20 @@ def save_local(project_dir: Path, s: LocalSettings) -> None:
                              "reviewer": s.reviewer}, indent=2) + "\n", encoding="utf-8")
 
 
+def validate_local(roots, reviewer: str) -> LocalSettings:
+    """Check settings typed by the user; ValueError (user-readable) if unusable."""
+    roots = [Path(r) for r in roots if str(r).strip()]
+    if not roots:
+        raise ValueError("Add at least one survey root folder.")
+    bad = [str(r) for r in roots if not r.is_dir()]
+    if bad:
+        raise ValueError("Survey root is not an existing folder: " + ", ".join(bad))
+    reviewer = (reviewer or "").strip()
+    if not reviewer:
+        raise ValueError("Enter a reviewer name.")
+    return LocalSettings(roots, reviewer)
+
+
 class SaveRefused(Exception):
     """Save not allowed; the message is shown to the user."""
 
@@ -110,6 +124,11 @@ class ReviewSession:
     @property
     def dirty(self) -> bool:
         return self._dirty
+
+    def goto(self, i: int) -> None:
+        """Jump to slice ``i`` (clamped), dropping any working edits."""
+        self.index = max(0, min(i, len(self.project.slices) - 1))
+        self._reset_working()
 
     def _spec(self, i: Optional[int]) -> SliceSpec:
         return self.current if i is None else self.project.slices[i]
