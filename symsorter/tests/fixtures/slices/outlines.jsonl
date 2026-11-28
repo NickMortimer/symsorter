@@ -1,0 +1,2 @@
+{"schema": "symsorter.outlines/1", "flight": "TESTA_20240101T0900", "frame_stem": "DJI_0001", "label": "turtle", "points": [[1000.0, 2000.0], [1040.0, 2000.0], [1040.0, 2040.0], [1000.0, 2040.0]], "source": "thumb:example_DJI_0001_det_0_turtle_224px.jpg", "frame_wh": [5472, 3648]}
+{"schema": "symsorter.outlines/1", "flight": "TESTA_20240101T0900", "frame_stem": "DJI_0001", "label": "turtle", "points": [[1100.0, 2050.0], [1140.0, 2050.0], [1140.0, 2090.0], [1100.0, 2090.0]], "source": "thumb:example_DJI_0001_det_1_turtle_224px.jpg", "frame_wh": [5472, 3648]}

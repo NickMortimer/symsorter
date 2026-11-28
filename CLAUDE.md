@@ -22,14 +22,14 @@ If you change a file format, CLI contract or JSON schema that the other repo rea
 
 ## Shared agent board
 
-Path (on deepthinker): `~/proj/board/board.md`
+Path (on deepthinker): `/home/mor582/code/board/board.md`
 - Read it before starting a task and after finishing one. Append only; never edit others' entries.
 - Format: `YYYY-MM-DD HH:MM [symsorter/<task>] STATUS: message`
   STATUS is one of CLAIM, DONE, BLOCKED, NOTE, QUESTION.
 - On DONE, include the pushed branch name and anything Nick should test in the GUI.
 - If you are running on the laptop instead, use it over SSH:
-  `ssh deepthinker cat ~/proj/board/board.md`
-  `ssh deepthinker 'echo "<entry>" >> ~/proj/board/board.md'`
+  `ssh deepthinker cat ~/code/board/board.md`
+  `ssh deepthinker 'echo "<entry>" >> ~/code/board/board.md'`
 
 ## Worktrees and branches
 

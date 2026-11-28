@@ -1,0 +1,32 @@
+{
+  "schema": "marine_count.slice_project/1",
+  "project_id": "example_r00",
+  "created": "2026-11-28T00:00:00Z",
+  "git_commit": "0000000",
+  "slice_px": 624,
+  "margin_px": 64,
+  "classes": ["turtle"],
+  "slices": [
+    {
+      "slice_id": "AU--TESTA--TESTA_20240101T0900__DJI_0001__758_1733",
+      "survey_id": "AU/TESTA/TESTA_20240101T0900",
+      "frame_id": "DJI_0001.JPG",
+      "frame_wh": [5472, 3648],
+      "x0": 758, "y0": 1733, "size": 624,
+      "kind": "turtle",
+      "polygons": [
+        {"label": "turtle", "points": [[1000.0, 2000.0], [1040.0, 2000.0], [1040.0, 2040.0], [1000.0, 2040.0]], "source": "thumb"},
+        {"label": "turtle", "points": [[1100.0, 2050.0], [1140.0, 2050.0], [1140.0, 2090.0], [1100.0, 2090.0]], "source": "thumb"}
+      ]
+    },
+    {
+      "slice_id": "AU--TESTA--TESTA_20240101T0900__DJI_0002__3900_400",
+      "survey_id": "AU/TESTA/TESTA_20240101T0900",
+      "frame_id": "DJI_0002.JPG",
+      "frame_wh": [5472, 3648],
+      "x0": 3900, "y0": 400, "size": 624,
+      "kind": "background",
+      "polygons": []
+    }
+  ]
+}
