@@ -106,3 +106,10 @@ def test_resolver_ignores_json_and_appledouble(tmp_path: Path) -> None:
 
 def test_resolver_missing(tmp_path: Path) -> None:
     assert FrameResolver([tmp_path]).find(FLIGHT, STEM) is None
+
+
+def test_strict_resolver_skips_stem_index(tmp_path: Path) -> None:
+    (tmp_path / "elsewhere").mkdir()
+    Image.new("RGB", (4, 4)).save(tmp_path / "elsewhere" / "DJI_0001.JPG")
+    assert FrameResolver([tmp_path]).find("F_1", "DJI_0001") is not None
+    assert FrameResolver([tmp_path], strict=True).find("F_1", "DJI_0001") is None

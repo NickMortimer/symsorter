@@ -160,7 +160,9 @@ def _survey_match(root: Path, flight: str, stem: str) -> Path | None:
 class FrameResolver:
     """Locate an original frame under survey roots; the first match wins."""
 
-    def __init__(self, roots: Sequence[Path]) -> None:
+    def __init__(self, roots: Sequence[Path], *, strict: bool = False) -> None:
+        """``strict=True`` disables the recursive stem-index fallback."""
+        self._strict = strict
         self._roots = [Path(root) for root in roots]
         self._by_root: dict[Path, dict[str, Path]] = {}
 
@@ -175,6 +177,8 @@ class FrameResolver:
             found = _survey_match(root, flight, stem)
             if found is not None:
                 return found
+            if self._strict:
+                continue
             indexed = self._stem_index(root).get(stem)
             if indexed is not None:
                 return indexed
