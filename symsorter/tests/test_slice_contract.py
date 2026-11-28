@@ -97,3 +97,16 @@ def test_non_object_json_is_contract_error(tmp_path):
     (tmp_path / "p.json").write_text("[1]")
     with pytest.raises(ContractError):
         load_project(tmp_path / "p.json")
+
+
+def test_append_keeps_valid_final_row_missing_newline(tmp_path):
+    lines = (FIX / "review.jsonl").read_text().splitlines()
+    new = ReviewRow("example_r00", "new1", "skip", (), "nick", "t")
+    p1 = tmp_path / "one.jsonl"
+    p1.write_text(lines[0])  # single line, no newline
+    append_review(p1, new)
+    assert len(load_reviews(p1)) == 2
+    p2 = tmp_path / "multi.jsonl"
+    p2.write_text("\n".join(lines))  # last valid line lacks newline
+    append_review(p2, new)
+    assert len(load_reviews(p2)) == 3

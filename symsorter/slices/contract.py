@@ -166,10 +166,20 @@ def append_review(path: Path, row: ReviewRow) -> None:
     if path.exists() and path.stat().st_size > 0:
         data = path.read_bytes()
         if not data.endswith(b"\n"):
-            # Torn final line from a crash: drop the fragment so the log stays valid.
-            warnings.warn(f"{path}: dropping torn final line before append", UserWarning)
-            with open(path, "r+b") as tf:
-                tf.truncate(data.rfind(b"\n") + 1)
+            cut = data.rfind(b"\n") + 1
+            try:
+                ok = isinstance(json.loads(data[cut:].decode("utf-8")), dict)
+            except ValueError:  # includes JSONDecodeError and UnicodeDecodeError
+                ok = False
+            if ok:
+                # Complete final row that just lacks its newline: keep it.
+                with open(path, "ab") as tf:
+                    tf.write(b"\n")
+            else:
+                # Torn final line from a crash: drop the fragment so the log stays valid.
+                warnings.warn(f"{path}: dropping torn final line before append", UserWarning)
+                with open(path, "r+b") as tf:
+                    tf.truncate(cut)
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(d) + "\n")
         f.flush()
