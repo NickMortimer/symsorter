@@ -191,6 +191,7 @@ from .commands.prepare_dataset import (
 from .commands.outline_draft import outline_draft_command
 from .commands.outline_import_boxes import outline_import_boxes_command
 from .commands.outline_export_frames import outline_export_frames_command
+from .commands.outline_export_contract import outline_export_contract_command
 from .commands.remap_sorted_npz import remap_sorted_npz_command
 
 @app.command(name="sort")
@@ -439,6 +440,20 @@ def outline_export_frames(
         overwrite=overwrite,
         dry_run=dry_run,
         limit=limit,
+    )
+
+
+@app.command(name="outline-export-contract")
+def outline_export_contract(
+    thumbs: list[Path] = typer.Option(..., "--thumbs", help="Thumbnail folder of flat *_224px.jpg files (repeatable)"),
+    roi_csv: Path = typer.Option(..., "--roi-csv", help="thumb_roi.csv; only status=ok rows are used"),
+    survey_roots: list[Path] = typer.Option(..., "--survey-root", help="Root used to locate original frames (repeatable)"),
+    denylist: Path = typer.Option(..., "--denylist", help="Sealed survey ids, one per line"),
+    out: Path = typer.Option(..., "--out", help="outlines.jsonl to write (overwritten)"),
+):
+    """Write locked thumb outlines as outlines.jsonl in full-frame pixels, excluding sealed surveys."""
+    return outline_export_contract_command(
+        thumbs=thumbs, roi_csv=roi_csv, survey_roots=survey_roots, denylist=denylist, out=out
     )
 
 
