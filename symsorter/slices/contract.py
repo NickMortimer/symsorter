@@ -68,7 +68,9 @@ class ReviewRow:
     reason: Optional[str] = None
 
 
-def _poly(d: Dict[str, Any], where: str) -> PolyT:
+def _poly(d: Any, where: str) -> PolyT:
+    if not isinstance(d, dict):
+        raise ContractError(f"{where}: polygon entry must be an object")
     if d.get("label") != LABEL:
         raise ContractError(f"{where}: label must be {LABEL!r}, got {d.get('label')!r}")
     try:
@@ -83,6 +85,8 @@ def load_project(path: Path) -> Project:
         d = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as e:
         raise ContractError(f"{path}: invalid JSON ({e})") from e
+    if not isinstance(d, dict):
+        raise ContractError(f"{path}: top level must be an object")
     if d.get("schema") != PROJECT_SCHEMA:
         raise ContractError(f"{path}: unknown schema {d.get('schema')!r}, expected {PROJECT_SCHEMA!r}")
     try:
@@ -105,7 +109,9 @@ def load_project(path: Path) -> Project:
         raise ContractError(f"{path}: malformed project ({e!r})") from e
 
 
-def _row_from_dict(d: Dict[str, Any], where: str) -> ReviewRow:
+def _row_from_dict(d: Any, where: str) -> ReviewRow:
+    if not isinstance(d, dict):
+        raise ContractError(f"{where}: row must be a JSON object")
     if d.get("schema") != REVIEW_SCHEMA:
         raise ContractError(f"{where}: unknown schema {d.get('schema')!r}")
     if d.get("status") not in STATUSES:
@@ -156,6 +162,14 @@ def append_review(path: Path, row: ReviewRow) -> None:
         v = getattr(row, k)
         if v is not None:
             d[k] = v
+    path = Path(path)
+    if path.exists() and path.stat().st_size > 0:
+        data = path.read_bytes()
+        if not data.endswith(b"\n"):
+            # Torn final line from a crash: drop the fragment so the log stays valid.
+            warnings.warn(f"{path}: dropping torn final line before append", UserWarning)
+            with open(path, "r+b") as tf:
+                tf.truncate(data.rfind(b"\n") + 1)
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(d) + "\n")
         f.flush()

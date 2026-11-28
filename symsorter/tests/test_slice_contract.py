@@ -65,3 +65,35 @@ def test_outline_row_matches_the_example():
         [[1000.0, 2000.0], [1040.0, 2000.0], [1040.0, 2040.0], [1000.0, 2040.0]],
         "thumb:example_DJI_0001_det_0_turtle_224px.jpg", (5472, 3648))
     assert row == json.loads((FIX / "outlines.jsonl").read_text().splitlines()[0])
+
+
+def test_append_after_torn_tail_keeps_log_readable(tmp_path):
+    p = tmp_path / "r.jsonl"
+    p.write_text((FIX / "review.jsonl").read_text() + '{"schema": "symsorter.sl')
+    row = ReviewRow("example_r00", "new1", "skip", (), "nick", "2026-12-01T10:00:00+10:00")
+    with pytest.warns(UserWarning):
+        append_review(p, row)
+    append_review(p, ReviewRow("example_r00", "new2", "skip", (), "nick", "t"))
+    r = load_reviews(p)
+    assert len(r) == 4 and r["new1"] == row and "new2" in r
+
+
+def test_unknown_review_schema_and_label_are_errors(tmp_path):
+    base = json.loads((FIX / "review.jsonl").read_text().splitlines()[0])
+    bad = dict(base, schema="symsorter.slice_review/2")
+    (tmp_path / "a.jsonl").write_text(json.dumps(bad) + "\n")
+    with pytest.raises(ContractError):
+        load_reviews(tmp_path / "a.jsonl")
+    bad = dict(base, polygons=[{"label": "shark", "points": [[0, 0], [1, 0], [1, 1]]}])
+    (tmp_path / "b.jsonl").write_text(json.dumps(bad) + "\n")
+    with pytest.raises(ContractError):
+        load_reviews(tmp_path / "b.jsonl")
+
+
+def test_non_object_json_is_contract_error(tmp_path):
+    (tmp_path / "a.jsonl").write_text("[1]\n")
+    with pytest.raises(ContractError):
+        load_reviews(tmp_path / "a.jsonl")
+    (tmp_path / "p.json").write_text("[1]")
+    with pytest.raises(ContractError):
+        load_project(tmp_path / "p.json")
