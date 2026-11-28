@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import warnings
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -116,9 +117,9 @@ class ReviewSession:
         if got is None:
             try:
                 got = locate_frame(spec, self._resolver)
-            except Exception:
-                got = FrameLookup(self._resolver.find(spec.flight, spec.frame_stem),
-                                  "frame unreadable")
+            except Exception as e:
+                warnings.warn(f"{spec.slice_id}: frame lookup failed: {e!r}", UserWarning)
+                got = FrameLookup(None, "frame unreadable")
             self._lookups[spec.slice_id] = got
         return got
 
@@ -142,7 +143,7 @@ class ReviewSession:
     def polygons(self) -> List[Polygon]:
         if self._polys is None:
             self._polys = self._saved_polys(self.current)
-        return self._polys
+        return [[list(p) for p in poly] for poly in self._polys]
 
     def set_polygons(self, polys: List[Polygon]) -> None:
         self._polys = [[list(p) for p in poly] for poly in polys]
@@ -197,13 +198,13 @@ class ReviewSession:
         if status not in STATUSES:
             raise SaveRefused(f"Unknown status {status!r}.")
         cur = self.current
+        prob = self.lookup().problem
+        if prob:
+            raise SaveRefused(f"Cannot save: {prob}.")
         x0, y0 = self.position()
         kept = [p for p in self.polygons()
                 if len(p) >= 3 and touches(p, x0, y0, cur.size)]
         if status == "complete":
-            prob = self.lookup().problem
-            if prob:
-                raise SaveRefused(f"Cannot complete: {prob}.")
             if any(not inside(p, x0, y0, cur.size) for p in kept):
                 raise SaveRefused(
                     "An outline crosses the slice edge. Re-centre the slice or edit the outline.")

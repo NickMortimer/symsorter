@@ -99,7 +99,7 @@ def test_resume_uses_saved_position_and_polygons(tmp_path):
     s.recentre_current()
     s.save("complete")
     s2 = open_session(proj, local)
-    s2.prev() if s2.index else None
+    assert s2.index == 1 and s2.prev() is True and s2.index == 0
     assert s2.position() == (796, 1733) and len(s2.polygons()) == 3
 
 
@@ -206,3 +206,43 @@ def test_local_settings_round_trip(tmp_path):
     save_local(tmp_path, s)
     assert (tmp_path / "project.local.json").exists()
     assert load_local(tmp_path) == s
+
+
+def test_save_refused_for_missing_frame_writes_nothing(tmp_path):
+    proj, local = make(tmp_path, frames=())
+    s = open_session(proj, local)
+    assert s.lookup().problem == "frame missing"
+    for st in ("complete", "skip", "reject"):
+        with pytest.raises(SaveRefused, match="frame missing"):
+            s.save(st)
+    assert not (proj / "review.jsonl").exists()
+
+
+def test_save_refused_for_size_mismatch(tmp_path):
+    proj, local = make(tmp_path)
+    Image.new("RGB", (100, 100)).save(
+        tmp_path / "root/AU/TESTA/TESTA_20240101T0900/DJI_0001.JPG")
+    s = open_session(proj, local)
+    assert s.current.slice_id == S2
+    s.index = 0
+    assert s.lookup().problem == "size mismatch 100x100"
+    with pytest.raises(SaveRefused, match="size mismatch"):
+        s.save("complete")
+    assert not (proj / "review.jsonl").exists()
+
+
+def test_polygons_returns_copy(session):
+    session.polygons()[0][0][0] = -5.0
+    session.polygons().append([])
+    assert session.polygons()[0][0][0] == 1000.0 and len(session.polygons()) == 2
+    assert not session.dirty
+
+
+def test_lookup_failure_in_resolver_maps_to_unreadable(env, monkeypatch):
+    _, _, s = env
+    def boom(*a, **k):
+        raise OSError("disk gone")
+    monkeypatch.setattr(s._resolver, "find", boom)
+    s._lookups.clear()
+    with pytest.warns(UserWarning, match="disk gone"):
+        assert s.lookup().problem == "frame unreadable"
