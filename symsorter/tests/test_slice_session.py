@@ -246,3 +246,10 @@ def test_lookup_failure_in_resolver_maps_to_unreadable(env, monkeypatch):
     s._lookups.clear()
     with pytest.warns(UserWarning, match="disk gone"):
         assert s.lookup().problem == "frame unreadable"
+
+
+def test_discard_changes_drops_unsaved_edits(session):
+    session.set_polygons([])
+    assert session.dirty
+    session.discard_changes()
+    assert not session.dirty and len(session.polygons()) == 2

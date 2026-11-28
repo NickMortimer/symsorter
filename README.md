@@ -279,6 +279,23 @@ In the Outline viewer, **Shift+F** (or the Frame button) opens the original-fram
 - Prefer clear surface (then clear deep) for the first cleaned batch; wave/double-flipper / heavy blur cases → leave unlocked or skip.
 - Lock (`K`) only when the outline is good enough that you do not want to redo it.
 
+## Slice review
+
+Review 624 px slices cut from full drone frames (a `marine_count` slice project) and mark each complete, rejected or skipped. File > **Open Slice Project...**, or `symsorter-gui --slice-project DIR`. The first open asks for survey roots (prefilled from Set Survey Roots) and a reviewer name, saved in `project.local.json` (laptop only). Frames are found by flight + stem and must match `frame_wh`; a slice whose frame is missing or the wrong size shows the problem and cannot be saved.
+
+The loop: open the project, check or fix the outlines (add a missed turtle with the SAM + tool), press `C`. Outline the whole turtle even past the slice edge; a complete slice whose outline crosses the edge is refused, and `R` moves the slice the least distance that holds every outline (check it, then `C`). The window resumes at the next unreviewed slice.
+
+Keys: `C` complete · `X` reject (optional reason) · `Space` skip · `N` next unreviewed · `P` previous · `R` re-centre · `A` adopt neighbour outlines · `E` edit · `L` lasso · `S` SAM point · `D` delete polygon · `H` pan. The slice border is dashed; neighbours are faint.
+
+Sync (run on the laptop; each file has one writer, so rsync never conflicts):
+
+```bash
+rsync -av deepthinker:<denylist path on deepthinker> ./sealed_surveys.txt   # once, and whenever the seal changes
+rsync -av outlines.jsonl deepthinker:/home/mor582/proj/slices/
+rsync -av --exclude project.local.json deepthinker:/home/mor582/proj/slices/slices_r01/project.json ./slices_r01/
+rsync -av --exclude project.local.json ./slices_r01/review.jsonl deepthinker:/home/mor582/proj/slices/slices_r01/
+```
+
 ## GUI Controls
 
 Common shortcuts:

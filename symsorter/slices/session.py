@@ -149,6 +149,10 @@ class ReviewSession:
         self._polys = [[list(p) for p in poly] for poly in polys]
         self._dirty = True
 
+    def discard_changes(self) -> None:
+        """Drop unsaved polygon and position edits for the current slice."""
+        self._reset_working()
+
     # -- neighbours -------------------------------------------------------
     def _others(self) -> List[Polygon]:
         cur = self.current

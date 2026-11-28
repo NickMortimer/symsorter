@@ -70,6 +70,11 @@ def build_menus(window):
     survey_roots_action.triggered.connect(lambda: window.set_survey_roots_dialog())
     file_menu.addAction(survey_roots_action)
 
+    slice_action = QAction('Open Slice Pro&ject…', window)
+    slice_action.setStatusTip('Review slices from a marine_count slice project')
+    slice_action.triggered.connect(lambda: window.open_slice_project())
+    file_menu.addAction(slice_action)
+
     # Classes
     classes_menu = menubar.addMenu('&Classes')
     window.classes_menu = classes_menu

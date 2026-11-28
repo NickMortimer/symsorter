@@ -240,6 +240,13 @@ class ImageBrowser(QMainWindow,
 
         open_outline_viewer_for_browser(self)
 
+    def open_slice_project(self, project_dir=None):
+        """Open the Slice review window for a marine_count slice project folder."""
+        from .ui.slice_review import open_slice_project_dialog
+
+        self._slice_review = open_slice_project_dialog(self, project_dir)
+        return self._slice_review
+
     def set_survey_roots_dialog(self):
         """Save survey roots and the ROI CSV used to locate original frames."""
         from .ui.frame_settings import edit_frame_settings_dialog
