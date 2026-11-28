@@ -82,7 +82,15 @@ class ReviewSession:
         self._clock = clock
         self.project: Project = load_project(self.project_dir / "project.json")
         self._review_path = self.project_dir / "review.jsonl"
-        self._reviews: Dict[str, ReviewRow] = load_reviews(self._review_path)
+        loaded = load_reviews(self._review_path)
+        self._reviews: Dict[str, ReviewRow] = {
+            k: r for k, r in loaded.items() if r.project_id == self.project.project_id}
+        self.foreign_reviews = len(loaded) - len(self._reviews)
+        if self.foreign_reviews:
+            others = sorted({r.project_id for r in loaded.values()} - {self.project.project_id})
+            warnings.warn(
+                f"{self._review_path}: ignoring {self.foreign_reviews} review row(s) from other "
+                f"project(s) {others}; expected {self.project.project_id!r}", UserWarning)
         self._resolver = FrameResolver(local.survey_roots, strict=True)
         self._lookups: Dict[str, FrameLookup] = {}
         self._polys: Optional[List[Polygon]] = None

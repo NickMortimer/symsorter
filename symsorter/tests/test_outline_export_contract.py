@@ -53,7 +53,8 @@ def test_locked_polygons_exported_in_frame_pixels(tmp_path):
     thumbs, csv, root = _tree(tmp_path)
     out = tmp_path / "o.jsonl"
     counts = export_contract([thumbs], csv, [root], DENY, out)
-    assert counts == {"ok": 1, "sealed": 1, "no_locked": 0, "no_roi_row": 0, "frame_missing": 0}
+    assert counts == {"ok": 1, "sealed": 1, "no_locked": 0, "no_roi_row": 0, "frame_missing": 0,
+                      "frame_unreadable": 0}
     [row] = [json.loads(l) for l in out.read_text().splitlines()]
     assert row["schema"] == "symsorter.outlines/1" and row["label"] == "turtle"
     assert row["flight"] == "TESTA_20240101T0900" and row["frame_stem"] == "DJI_0001"
@@ -92,7 +93,8 @@ def test_missing_frame_and_missing_roi_row_are_counted(tmp_path):
         fh.write(_roi(no_frame, "TESTA_20240101T0900", "DJI_0009"))
         fh.write(_roi(unlocked, "TESTA_20240101T0900", "DJI_0001"))
     counts = export_contract([thumbs], csv, [root], DENY, tmp_path / "o.jsonl")
-    assert counts == {"ok": 1, "sealed": 1, "no_locked": 1, "no_roi_row": 1, "frame_missing": 1}
+    assert counts == {"ok": 1, "sealed": 1, "no_locked": 1, "no_roi_row": 1, "frame_missing": 1,
+                      "frame_unreadable": 0}
 
 
 def test_rows_sorted_and_output_overwritten(tmp_path):
@@ -115,3 +117,19 @@ def test_cli_prints_counts(tmp_path):
         "--survey-root", str(root), "--denylist", str(deny), "--out", str(tmp_path / "o.jsonl")])
     assert res.exit_code == 0, res.output
     assert "ok=1" in res.output and "sealed=1" in res.output
+
+
+def test_denylist_trailing_slash_still_seals(tmp_path):
+    thumbs, csv, root = _tree(tmp_path)
+    out = tmp_path / "o.jsonl"
+    counts = export_contract([thumbs], csv, [root], frozenset({"AU/SEAL/SEAL_20240101T0900/"}), out)
+    assert counts["sealed"] == 1 and "SEAL_" not in out.read_text()
+
+
+def test_corrupt_frame_is_counted_not_fatal(tmp_path):
+    thumbs, csv, root = _tree(tmp_path)
+    (root / "AU/TESTA/TESTA_20240101T0900/DJI_0001.JPG").write_bytes(b"junk")
+    out = tmp_path / "o.jsonl"
+    counts = export_contract([thumbs], csv, [root], DENY, out)
+    assert counts["frame_unreadable"] == 1 and counts["ok"] == 0
+    assert out.read_text() == ""

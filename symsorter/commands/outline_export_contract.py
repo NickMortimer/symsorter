@@ -47,10 +47,12 @@ def export_contract(
     out: Path,
 ) -> Dict[str, int]:
     """Write locked outlines in frame pixels to ``out``; return per-reason counts."""
-    sealed_flights = {sid.split("/")[-1] for sid in denylist}
+    sealed_flights = {sid.strip().rstrip("/").split("/")[-1] for sid in denylist}
+    sealed_flights.discard("")
     roi = RoiIndex.load(Path(roi_csv))
     resolver = FrameResolver([Path(r) for r in survey_roots])
-    counts = {"ok": 0, "sealed": 0, "no_locked": 0, "no_roi_row": 0, "frame_missing": 0}
+    counts = {"ok": 0, "sealed": 0, "no_locked": 0, "no_roi_row": 0, "frame_missing": 0,
+              "frame_unreadable": 0}
     rows: List[Tuple[Tuple[str, str, str], dict]] = []
 
     paths: List[Path] = []
@@ -77,7 +79,11 @@ def export_contract(
         if frame is None:
             counts["frame_missing"] += 1
             continue
-        wh = frame_size(frame)
+        try:
+            wh = frame_size(frame)
+        except Exception:  # noqa: BLE001 - one corrupt frame must not abort the export
+            counts["frame_unreadable"] += 1
+            continue
         crop = crop_window_for_row(row, wh)
         source = f"thumb:{thumb.name}"
         for poly in locked:

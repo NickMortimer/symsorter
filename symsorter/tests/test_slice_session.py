@@ -118,7 +118,8 @@ def test_unreadable_frame_behaves_as_missing(tmp_path):
     proj, local = make(tmp_path)
     (tmp_path / "root/AU/TESTA/TESTA_20240101T0900/DJI_0002.JPG").write_bytes(b"junk")
     s = open_session(proj, local)
-    assert s.lookup(1).problem == "frame unreadable"
+    with pytest.warns(UserWarning, match="frame lookup failed"):
+        assert s.lookup(1).problem == "frame unreadable"
     assert s.progress()["missing"] == 1 and s.next_unreviewed() is False
 
 
@@ -253,3 +254,14 @@ def test_discard_changes_drops_unsaved_edits(session):
     assert session.dirty
     session.discard_changes()
     assert not session.dirty and len(session.polygons()) == 2
+
+
+def test_reviews_for_other_project_are_ignored_with_warning(tmp_path):
+    proj, local = make(tmp_path)
+    from symsorter.slices.contract import ReviewRow, append_review
+    append_review(proj / "review.jsonl", ReviewRow(
+        project_id="someone_else", slice_id=S1, status="complete", polygons=(),
+        reviewer="x", time="t"))
+    with pytest.warns(UserWarning, match="someone_else"):
+        s = open_session(proj, local)
+    assert s.foreign_reviews == 1 and s.status(0) is None and s.index == 0
