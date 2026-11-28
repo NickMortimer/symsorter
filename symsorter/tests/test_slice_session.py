@@ -55,18 +55,52 @@ def test_starts_at_first_unreviewed_and_saves_complete(env):
     assert load_reviews(proj / "review.jsonl")[row.slice_id] == row
 
 
-def test_complete_refused_when_polygon_crosses_edge_then_recentre_allows_it(session):
+MARGIN = [[700.0, 1700.0], [740.0, 1700.0], [720.0, 1720.0]]
+
+
+def test_complete_crossing_edge_recentres_and_refuses_then_second_save_works(env):
+    proj, _, session = env
     session.set_polygons(session.polygons() + [[[1350.0, 2000.0], [1420.0, 2000.0], [1420.0, 2040.0]]])
-    with pytest.raises(SaveRefused, match="Re-centre"):
+    with pytest.raises(SaveRefused, match="moved") as ei:
         session.save("complete")
-    assert session.recentre_current() and session.position() == (796, 1733)
+    assert ei.value.moved
+    assert session.position() == (796, 1733)
+    assert not (proj / "review.jsonl").exists() or not load_reviews(proj / "review.jsonl")
     row = session.save("complete")
-    assert (row.x0, row.y0) == (796, 1733)
+    assert (row.x0, row.y0) == (796, 1733) and len(row.polygons) == 3
 
 
-def test_polygon_wholly_in_margin_is_dropped_on_save(session):
-    session.set_polygons(session.polygons() + [[[700.0, 1700.0], [740.0, 1700.0], [720.0, 1720.0]]])
-    assert len(session.save("complete").polygons) == 2
+def test_complete_margin_only_outline_recentres_refuses_then_saves(env):
+    proj, _, session = env
+    session.set_polygons(session.polygons() + [MARGIN])
+    with pytest.raises(SaveRefused, match="check the newly uncovered area") as ei:
+        session.save("complete")
+    assert ei.value.moved
+    assert session.position() != (758, 1733) and session.dirty
+    assert not (proj / "review.jsonl").exists() or not load_reviews(proj / "review.jsonl")
+    x0, y0 = session.position()
+    row = session.save("complete")
+    assert (row.x0, row.y0) == (x0, y0) and len(row.polygons) == 3
+    assert load_reviews(proj / "review.jsonl")[S1] == row
+
+
+def test_complete_outlines_that_cannot_fit_refused_position_unchanged(env):
+    proj, _, session = env
+    session.set_polygons(session.polygons() + [[[0.0, 0.0], [900.0, 0.0], [900.0, 10.0]]])
+    with pytest.raises(SaveRefused, match="reject") as ei:
+        session.save("complete")
+    assert not ei.value.moved
+    assert session.position() == (758, 1733)
+    assert not (proj / "review.jsonl").exists() or not load_reviews(proj / "review.jsonl")
+
+
+def test_reject_and_skip_still_drop_margin_outlines(env):
+    _, _, session = env
+    session.set_polygons(session.polygons() + [MARGIN])
+    assert len(session.save("reject", "x").polygons) == 2
+    session.goto(1)
+    session.set_polygons([MARGIN])
+    assert session.save("skip").polygons == ()
 
 
 def test_degenerate_polygon_dropped_on_save(session):

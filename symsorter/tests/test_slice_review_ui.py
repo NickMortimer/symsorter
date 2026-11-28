@@ -42,8 +42,7 @@ def test_crossing_polygon_shows_refusal_and_recentre_fixes_it(qapp, session):
     session.set_polygons(session.polygons() + [CROSSING])
     dlg = dialog(session)
     QTest.keyClick(dlg, Qt.Key_C)
-    assert "Re-centre" in dlg.status_label.text() and session.status(0) is None
-    QTest.keyClick(dlg, Qt.Key_R)
+    assert "moved" in dlg.status_label.text() and session.status(0) is None
     assert session.position() == (796, 1733)
     QTest.keyClick(dlg, Qt.Key_C)
     assert session.status(0) == "complete"
@@ -108,7 +107,7 @@ def test_moving_with_unsaved_edits_save_as_complete(qapp, tmp_path, monkeypatch)
     s.index = 1
     dlg = dialog(s)
     dlg.canvas._polygons.append({"label": "turtle", "flags": {}, "shape_type": "polygon",
-                                 "points": [[10.0, 10.0], [50.0, 10.0], [50.0, 50.0]]})
+                                 "points": [[200.0, 200.0], [240.0, 200.0], [240.0, 240.0]]})
     dlg.canvas.polygonsChanged.emit()
     monkeypatch.setattr(dlg, "_ask_leave", lambda: "save")
     QTest.keyClick(dlg, Qt.Key_P)

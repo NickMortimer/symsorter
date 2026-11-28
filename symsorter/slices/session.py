@@ -66,7 +66,14 @@ def validate_local(roots, reviewer: str) -> LocalSettings:
 
 
 class SaveRefused(Exception):
-    """Save not allowed; the message is shown to the user."""
+    """Save not allowed; the message is shown to the user.
+
+    ``moved`` is True when the refusal re-centred the slice, so the view must redraw.
+    """
+
+    def __init__(self, message: str = "", moved: bool = False) -> None:
+        super().__init__(message)
+        self.moved = moved
 
 
 def _now() -> str:
@@ -233,12 +240,21 @@ class ReviewSession:
         if prob:
             raise SaveRefused(f"Cannot save: {prob}.")
         x0, y0 = self.position()
-        kept = [p for p in self.polygons()
-                if len(p) >= 3 and touches(p, x0, y0, cur.size)]
+        valid = [p for p in self.polygons() if len(p) >= 3]
         if status == "complete":
-            if any(not inside(p, x0, y0, cur.size) for p in kept):
+            # Margin outlines are never dropped: move the slice to hold them, then
+            # make Nick look at the newly uncovered area before the crop is saved.
+            if any(not inside(p, x0, y0, cur.size) for p in valid):
+                if not self.recentre_current():
+                    raise SaveRefused(
+                        "No 624 slice can hold every outline. Delete the margin outline "
+                        "or reject this slice.")
                 raise SaveRefused(
-                    "An outline crosses the slice edge. Re-centre the slice or edit the outline.")
+                    "The slice moved to include an outline that was not wholly inside it. "
+                    "Please check the newly uncovered area, then save again.", moved=True)
+            kept = valid
+        else:
+            kept = [p for p in valid if touches(p, x0, y0, cur.size)]
         same = (x0, y0) == (cur.x0, cur.y0)
         row = ReviewRow(
             project_id=self.project.project_id, slice_id=cur.slice_id, status=status,

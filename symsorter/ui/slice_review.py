@@ -164,6 +164,8 @@ class SliceReviewDialog(QDialog):
             try:
                 self.session.save("complete")
             except SaveRefused as e:
+                if e.moved:
+                    self.show_current(refit=False)
                 self._set_status(str(e))
                 return False
             return True
@@ -328,6 +330,8 @@ class SliceReviewDialog(QDialog):
         try:
             self.session.save(status, reason)
         except SaveRefused as e:
+            if e.moved:
+                self.show_current(refit=False)
             self._set_status(str(e))
             return
         moved = self.session.next_unreviewed()
